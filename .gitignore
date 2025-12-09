@@ -1,0 +1,74 @@
+# OS artifacts
+.DS_Store
+**/.DS_Store
+._*
+
+# Local properties (machine-specific SDK paths - auto-generated)
+**/local.properties
+local.properties
+
+# Signing keys (sensitive - never commit)
+**/key.properties
+*.jks
+*.keystore
+*.pem
+*.p12
+**/release-key.*
+**/debug-key.*
+**/upload-key.*
+signing.properties
+
+# Flutter generated
+**/GeneratedPluginRegistrant.java
+
+# Build outputs
+**/build/
+**/outputs/
+**/.cxx/
+**/generated/
+**/intermediates/
+**/tmp/
+*.class
+*.dex
+*.apk
+*.ap_
+*.aab
+
+# Gradle caches
+.gradle/
+
+# IDE and tooling caches
+**/.gradle/
+**/.idea/
+**/.kotlin/
+**/*.iml
+
+# Dart/Flutter
+.dart_tool/
+**/.dart_tool/
+.packages
+.pub-cache/
+.pub/
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# Native build artifacts
+**/.externalNativeBuild/
+**/obj/
+
+# Logs and temp files
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+logs/
+
+# Secrets and credentials
+*.secret
+.env
+.env.*
+secrets.properties
+credentials.json
+google-services.json

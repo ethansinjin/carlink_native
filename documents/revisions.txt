@@ -1,0 +1,27 @@
+// Document each versionCode revision that is tested/compiled. To keep a history of modifications the entries should be brief, but informative.
+// Line formatting, [versionCode] :: <Brief but information Description. Pushed <DDMMYY HH:MM AM/PM
+//
+// START EXAMPLE
+//
+// [34] :: Troubleshooting 'AudioAttributes.USAGE' support in AAOS for the different Audio streams. Pushed: 26NOV25 11:30PM
+// [35] :: Issue: Audio Distortion. Attempting fix by increasing buffer size. Pushed: 26NOV25 12:53PM
+//
+// END EXAMPLE
+//
+// Major changes or discoveries. The appropriate .MD in Project:/Documentation/ should be updated/corrected or created with more technical information.
+//
+
+[1] :: Initial Release
+[2] :: Permission Prompt not shown, fixed. Ktlint issues corrected. PUSHED:
+[3] :: No Video Output, bad code. Audio Output confirms connection is active/stable.
+[4] :: Video output corrected.
+[5] :: Video Scaling in Non-Immersive vs Immersive Corrected
+[6] :: Audio Quality issue. Popping/Clipping Heard, possible parsing of header bytes. Attempting filtering.
+[7] :: Status Card fix and icon upload for CarPlay 'HostUI' shortcut.
+[8] :: Recovery logic on disconnects. Static Analysis corrections.
+[9] :: Video Code revert back to Carlink Flutter v1.9.0
+[10] :: Audio Code Testing
+
+[11] :: Video code rewrite and lint corrections
+[12] :: More Video Code testing
+[13] :: Video Frame message not being recovered properly. Corrected for stable Video. PUSHED: 08DEC25 3:57PM

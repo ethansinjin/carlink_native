@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Carlinkit CPC200-CCPA Primary -->
+    <usb-device vendor-id="4884" product-id="5408" />
+    <usb-device vendor-id="4884" product-id="5409" />
+    <!-- Alternate device ID -->
+    <usb-device vendor-id="2276" product-id="448" />
+</resources>
