@@ -35,6 +35,9 @@ import com.carlink.util.LogCallback
 import com.carlink.video.H264Renderer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.Timer
 import java.util.TimerTask
@@ -142,7 +145,10 @@ class CarlinkManager(
 
     // Timers
     private var pairTimeout: Timer? = null
-    private var frameInterval: Timer? = null
+    private var frameIntervalJob: Job? = null
+
+    // Phone type tracking for frame interval decisions
+    private var currentPhoneType: PhoneType? = null
 
     // Recovery tracking (matches Flutter CarlinkPlugin.kt)
     private var lastResetTime: Long = 0
@@ -386,8 +392,10 @@ class CarlinkManager(
      * Stop and disconnect.
      */
     fun stop() {
+        logDebug("[LIFECYCLE] stop() called - clearing frame interval and phoneType", tag = Logger.Tags.VIDEO)
         clearPairTimeout()
-        clearFrameInterval()
+        stopFrameInterval()
+        currentPhoneType = null  // Clear phone type on disconnect
         stopMicrophoneCapture()
 
         adapterDriver?.stop()
@@ -501,6 +509,8 @@ class CarlinkManager(
         logInfo("[DEVICE_OPS] Resetting H264 video decoder", tag = Logger.Tags.VIDEO)
         h264Renderer?.reset()
         logInfo("[DEVICE_OPS] H264 video decoder reset completed", tag = Logger.Tags.VIDEO)
+        // Ensure frame interval running after manual reset
+        ensureFrameIntervalRunning()
     }
 
     /**
@@ -568,26 +578,18 @@ class CarlinkManager(
     private fun handleMessage(message: Message) {
         when (message) {
             is PluggedMessage -> {
+                logInfo("[PLUGGED] Device plugged: phoneType=${message.phoneType}, wifi=${message.wifi}", tag = Logger.Tags.VIDEO)
                 clearPairTimeout()
-                clearFrameInterval()
+                stopFrameInterval()  // Stop any existing timer (clean slate)
 
-                // Start frame interval if needed for CarPlay
+                // Store phone type for frame interval decisions during recovery
+                currentPhoneType = message.phoneType
+                logDebug("[PLUGGED] Stored currentPhoneType=$currentPhoneType", tag = Logger.Tags.VIDEO)
+
+                // Start frame interval for CarPlay
                 // This periodic keyframe request keeps video streaming stable
-                if (message.phoneType == PhoneType.CARPLAY) {
-                    logInfo("[FRAME_INTERVAL] Starting periodic keyframe request (every 5s) for CarPlay", tag = Logger.Tags.VIDEO)
-                    frameInterval =
-                        Timer().apply {
-                            scheduleAtFixedRate(
-                                object : TimerTask() {
-                                    override fun run() {
-                                        adapterDriver?.sendCommand(CommandMapping.FRAME)
-                                    }
-                                },
-                                5000,
-                                5000,
-                            )
-                        }
-                }
+                // Protocol specifies FRAME command every 5 seconds during session
+                ensureFrameIntervalRunning()
 
                 setState(State.DEVICE_CONNECTED)
             }
@@ -604,6 +606,8 @@ class CarlinkManager(
                 if (state != State.STREAMING) {
                     logInfo("Video streaming started", tag = Logger.Tags.VIDEO)
                     setState(State.STREAMING)
+                    // Safety net: ensure frame interval running when video starts
+                    ensureFrameIntervalRunning()
                 }
 
                 // Feed video data to renderer (fallback when direct processing not used)
@@ -620,6 +624,8 @@ class CarlinkManager(
                 if (state != State.STREAMING) {
                     logInfo("Video streaming started (direct processing)", tag = Logger.Tags.VIDEO)
                     setState(State.STREAMING)
+                    // Safety net: ensure frame interval running when video starts
+                    ensureFrameIntervalRunning()
                 }
                 // Video data already processed directly into ring buffer by videoProcessor
             }
@@ -824,8 +830,9 @@ class CarlinkManager(
             return
         }
 
-        // Only clear frame interval for non-recoverable errors
-        clearFrameInterval()
+        // Only stop frame interval for non-recoverable errors
+        stopFrameInterval()
+        currentPhoneType = null
 
         // Set state to disconnected
         setState(State.DISCONNECTED)
@@ -868,6 +875,11 @@ class CarlinkManager(
         lastResetTime = currentTime
 
         logInfo("[ERROR RECOVERY] Reset count: $consecutiveResets in window", tag = Logger.Tags.ADAPTR)
+
+        // CRITICAL: Ensure frame interval is running after codec reset
+        // This fixes the bug where timer stopped during disconnect and never restarted
+        logDebug("[ERROR RECOVERY] Ensuring frame interval running after codec reset", tag = Logger.Tags.VIDEO)
+        ensureFrameIntervalRunning()
 
         // If we've hit the threshold, perform complete cleanup
         if (consecutiveResets >= RESET_THRESHOLD) {
@@ -919,12 +931,59 @@ class CarlinkManager(
         pairTimeout = null
     }
 
-    private fun clearFrameInterval() {
-        if (frameInterval != null) {
-            logInfo("[FRAME_INTERVAL] Stopping periodic keyframe request", tag = Logger.Tags.VIDEO)
-            frameInterval?.cancel()
-            frameInterval = null
+    /**
+     * Ensures the periodic keyframe request is running for CarPlay connections.
+     *
+     * Safe to call multiple times - will not create duplicate jobs.
+     * Uses coroutines for better lifecycle management and error handling.
+     *
+     * Per CPC200-CCPA protocol, FRAME command should be sent every 5 seconds
+     * during active CarPlay sessions to maintain decoder stability.
+     */
+    @Synchronized
+    private fun ensureFrameIntervalRunning() {
+        val phoneType = currentPhoneType
+        val jobActive = frameIntervalJob?.isActive == true
+
+        // Only for CarPlay - protocol specifies 5s keyframe interval
+        if (phoneType != PhoneType.CARPLAY) {
+            logDebug("[FRAME_INTERVAL] Skipping - phoneType=$phoneType (not CarPlay)", tag = Logger.Tags.VIDEO)
+            return
         }
+
+        // Already running - nothing to do
+        if (jobActive) {
+            logDebug("[FRAME_INTERVAL] Already running - no action needed", tag = Logger.Tags.VIDEO)
+            return
+        }
+
+        logInfo("[FRAME_INTERVAL] Starting periodic keyframe request (every 5s) for CarPlay", tag = Logger.Tags.VIDEO)
+
+        frameIntervalJob = scope.launch(Dispatchers.IO) {
+            var requestCount = 0
+            while (isActive) {
+                delay(5000)
+                requestCount++
+                val sent = adapterDriver?.sendCommand(CommandMapping.FRAME) ?: false
+                logDebug("[FRAME_INTERVAL] Keyframe request #$requestCount sent=$sent", tag = Logger.Tags.VIDEO)
+            }
+            logDebug("[FRAME_INTERVAL] Coroutine ended after $requestCount requests", tag = Logger.Tags.VIDEO)
+        }
+    }
+
+    /**
+     * Stops the periodic keyframe request.
+     */
+    @Synchronized
+    private fun stopFrameInterval() {
+        val wasActive = frameIntervalJob?.isActive == true
+        if (wasActive) {
+            logInfo("[FRAME_INTERVAL] Stopping periodic keyframe request (wasActive=$wasActive)", tag = Logger.Tags.VIDEO)
+            frameIntervalJob?.cancel()
+        } else {
+            logDebug("[FRAME_INTERVAL] Stop called but job not active (wasActive=$wasActive)", tag = Logger.Tags.VIDEO)
+        }
+        frameIntervalJob = null
     }
 
     /**

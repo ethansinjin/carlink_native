@@ -27,3 +27,4 @@
 [13] :: Video Frame message not being recovered properly. Corrected for stable Video. PUSHED: 08DEC25 3:57PM
 [14] :: Removed Status page
 [15] :: Adapter Config page Testing. PUSHED: 9DEC25 11:05AM
+[16] :: Video Frame Interval Change. Replaced Timer with coroutine Job. PUSHED: 10DEC25 11:50AM
