@@ -62,6 +62,9 @@ class MediaSessionManager(
     private var isPlaying: Boolean = false
     private var currentPosition: Long = 0L
 
+    // Lock for thread-safe MediaSession access (USB thread + main thread)
+    private val sessionLock = Any()
+
     /**
      * Callback interface for media control events from AAOS/steering wheel.
      */
@@ -165,49 +168,59 @@ class MediaSessionManager(
         albumArt: ByteArray?,
         duration: Long = 0L,
     ) {
-        val session = mediaSession ?: return
+        synchronized(sessionLock) {
+            val session = mediaSession ?: return
 
-        try {
-            val builder =
-                MediaMetadataCompat
-                    .Builder()
-                    .putString(
-                        MediaMetadataCompat.METADATA_KEY_TITLE,
-                        title ?: "Unknown",
-                    ).putString(
-                        MediaMetadataCompat.METADATA_KEY_ARTIST,
-                        artist ?: "Unknown",
-                    ).putString(
-                        MediaMetadataCompat.METADATA_KEY_ALBUM,
-                        album ?: "",
-                    ).putString(
-                        MediaMetadataCompat.METADATA_KEY_DISPLAY_SUBTITLE,
-                        appName ?: "Carlink",
-                    )
+            try {
+                val builder =
+                    MediaMetadataCompat
+                        .Builder()
+                        .putString(
+                            MediaMetadataCompat.METADATA_KEY_TITLE,
+                            title ?: "Unknown",
+                        ).putString(
+                            MediaMetadataCompat.METADATA_KEY_ARTIST,
+                            artist ?: "Unknown",
+                        ).putString(
+                            MediaMetadataCompat.METADATA_KEY_ALBUM,
+                            album ?: "",
+                        ).putString(
+                            MediaMetadataCompat.METADATA_KEY_DISPLAY_SUBTITLE,
+                            appName ?: "Carlink",
+                        )
 
-            // Add duration if known
-            if (duration > 0) {
-                builder.putLong(MediaMetadataCompat.METADATA_KEY_DURATION, duration)
-            }
-
-            // Decode and add album art
-            albumArt?.let { bytes ->
-                try {
-                    val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                    if (bitmap != null) {
-                        builder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, bitmap)
-                        builder.putBitmap(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, bitmap)
-                    }
-                } catch (e: Exception) {
-                    log("[MEDIA_SESSION] Failed to decode album art: ${e.message}")
+                // Add duration if known
+                if (duration > 0) {
+                    builder.putLong(MediaMetadataCompat.METADATA_KEY_DURATION, duration)
                 }
+
+                // Decode and add album art, or clear if null/failed
+                if (albumArt != null) {
+                    try {
+                        val bitmap = BitmapFactory.decodeByteArray(albumArt, 0, albumArt.size)
+                        if (bitmap != null) {
+                            builder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, bitmap)
+                            builder.putBitmap(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, bitmap)
+                        } else {
+                            // Decode returned null - clear stale album art
+                            builder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, null)
+                            builder.putBitmap(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, null)
+                            log("[MEDIA_SESSION] Album art decode returned null, cleared")
+                        }
+                    } catch (e: Exception) {
+                        // Decode failed - clear stale album art
+                        builder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, null)
+                        builder.putBitmap(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, null)
+                        log("[MEDIA_SESSION] Failed to decode album art, cleared: ${e.message}")
+                    }
+                }
+
+                session.setMetadata(builder.build())
+
+                log("[MEDIA_SESSION] Metadata updated: $title - $artist")
+            } catch (e: Exception) {
+                log("[MEDIA_SESSION] Failed to update metadata: ${e.message}")
             }
-
-            session.setMetadata(builder.build())
-
-            log("[MEDIA_SESSION] Metadata updated: $title - $artist")
-        } catch (e: Exception) {
-            log("[MEDIA_SESSION] Failed to update metadata: ${e.message}")
         }
     }
 
@@ -221,23 +234,25 @@ class MediaSessionManager(
         playing: Boolean,
         position: Long = 0L,
     ) {
-        val session = mediaSession ?: return
+        synchronized(sessionLock) {
+            val session = mediaSession ?: return
 
-        isPlaying = playing
-        currentPosition = position
+            isPlaying = playing
+            currentPosition = position
 
-        val state =
-            if (playing) {
-                PlaybackStateCompat.STATE_PLAYING
-            } else {
-                PlaybackStateCompat.STATE_PAUSED
+            val state =
+                if (playing) {
+                    PlaybackStateCompat.STATE_PLAYING
+                } else {
+                    PlaybackStateCompat.STATE_PAUSED
+                }
+
+            try {
+                session.setPlaybackState(buildPlaybackState(state, position))
+                log("[MEDIA_SESSION] Playback state: ${if (playing) "PLAYING" else "PAUSED"}")
+            } catch (e: Exception) {
+                log("[MEDIA_SESSION] Failed to update playback state: ${e.message}")
             }
-
-        try {
-            session.setPlaybackState(buildPlaybackState(state, position))
-            log("[MEDIA_SESSION] Playback state: ${if (playing) "PLAYING" else "PAUSED"}")
-        } catch (e: Exception) {
-            log("[MEDIA_SESSION] Failed to update playback state: ${e.message}")
         }
     }
 
@@ -245,16 +260,18 @@ class MediaSessionManager(
      * Set playback state to stopped/idle.
      */
     fun setStateStopped() {
-        val session = mediaSession ?: return
+        synchronized(sessionLock) {
+            val session = mediaSession ?: return
 
-        isPlaying = false
-        currentPosition = 0L
+            isPlaying = false
+            currentPosition = 0L
 
-        try {
-            session.setPlaybackState(buildPlaybackState(PlaybackStateCompat.STATE_STOPPED))
-            log("[MEDIA_SESSION] Playback state: STOPPED")
-        } catch (e: Exception) {
-            log("[MEDIA_SESSION] Failed to set stopped state: ${e.message}")
+            try {
+                session.setPlaybackState(buildPlaybackState(PlaybackStateCompat.STATE_STOPPED))
+                log("[MEDIA_SESSION] Playback state: STOPPED")
+            } catch (e: Exception) {
+                log("[MEDIA_SESSION] Failed to set stopped state: ${e.message}")
+            }
         }
     }
 
@@ -262,23 +279,25 @@ class MediaSessionManager(
      * Set state to connecting/buffering.
      */
     fun setStateConnecting() {
-        val session = mediaSession ?: return
+        synchronized(sessionLock) {
+            val session = mediaSession ?: return
 
-        try {
-            session.setPlaybackState(buildPlaybackState(PlaybackStateCompat.STATE_CONNECTING))
+            try {
+                session.setPlaybackState(buildPlaybackState(PlaybackStateCompat.STATE_CONNECTING))
 
-            // Set connecting metadata
-            session.setMetadata(
-                MediaMetadataCompat
-                    .Builder()
-                    .putString(MediaMetadataCompat.METADATA_KEY_TITLE, "Connecting...")
-                    .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, "Carlink")
-                    .build(),
-            )
+                // Set connecting metadata
+                session.setMetadata(
+                    MediaMetadataCompat
+                        .Builder()
+                        .putString(MediaMetadataCompat.METADATA_KEY_TITLE, "Connecting...")
+                        .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, "Carlink")
+                        .build(),
+                )
 
-            log("[MEDIA_SESSION] Playback state: CONNECTING")
-        } catch (e: Exception) {
-            log("[MEDIA_SESSION] Failed to set connecting state: ${e.message}")
+                log("[MEDIA_SESSION] Playback state: CONNECTING")
+            } catch (e: Exception) {
+                log("[MEDIA_SESSION] Failed to set connecting state: ${e.message}")
+            }
         }
     }
 

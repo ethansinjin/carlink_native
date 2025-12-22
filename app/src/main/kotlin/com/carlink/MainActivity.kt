@@ -49,7 +49,8 @@ import com.carlink.util.IconAssets
 import com.carlink.ui.MainScreen
 import com.carlink.ui.SettingsScreen
 import com.carlink.ui.settings.AdapterConfigPreference
-import com.carlink.ui.settings.ImmersivePreference
+import com.carlink.ui.settings.DisplayMode
+import com.carlink.ui.settings.DisplayModePreference
 import com.carlink.ui.theme.CarlinkTheme
 
 /**
@@ -68,7 +69,7 @@ class MainActivity : ComponentActivity() {
     // is destroyed before initialization completes (e.g., low memory kill)
     private var carlinkManager: CarlinkManager? = null
     private var fileLogManager: FileLogManager? = null
-    private var isImmersiveModeEnabled: Boolean = false
+    private var currentDisplayMode: DisplayMode = DisplayMode.SYSTEM_UI_VISIBLE
 
     // Permission launcher
     private val micPermissionLauncher =
@@ -125,10 +126,10 @@ class MainActivity : ComponentActivity() {
         // Initialize logging
         initializeLogging()
 
-        // Load immersive mode preference and apply BEFORE calculating display dimensions
-        // This ensures correct viewport sizing - immersive mode uses full screen (1920x1080),
-        // non-immersive uses usable area excluding system bars (1920x822)
-        loadAndApplyImmersiveMode()
+        // Load display mode preference and apply BEFORE calculating display dimensions
+        // This ensures correct viewport sizing - fullscreen immersive uses full screen (1920x1080),
+        // other modes use usable area excluding visible system bars
+        loadAndApplyDisplayMode()
 
         // Initialize Carlink manager (must be AFTER immersive mode is applied)
         // so display dimensions are calculated correctly for the active mode
@@ -150,7 +151,7 @@ class MainActivity : ComponentActivity() {
                     CarlinkApp(
                         carlinkManager = manager,
                         fileLogManager = fileLogManager,
-                        isImmersiveMode = isImmersiveModeEnabled,
+                        displayMode = currentDisplayMode,
                     )
                 }
             }
@@ -159,10 +160,29 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        // Restore immersive mode when returning to app (only if preference is enabled)
-        if (isImmersiveModeEnabled) {
-            applyImmersiveMode()
-        }
+        // Restore display mode when returning to app
+        // System may have shown bars while app was in background
+        applyDisplayMode(currentDisplayMode)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // Resume video decoding when app returns to foreground
+        // On AAOS, Surface may remain valid while app is in background, but
+        // BufferQueue can stall. Resume codec and request keyframe for immediate video.
+        logInfo("[LIFECYCLE] onStart - resuming video", tag = "MAIN")
+        carlinkManager?.resumeVideo()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // Pause video decoding when app goes to background
+        // On AAOS, when another app covers this app (Maps, Phone, etc.), the Surface
+        // may remain valid but SurfaceFlinger stops consuming frames. This causes
+        // BufferQueue to fill up, stalling the decoder. Flushing prevents this.
+        // USB connection and audio continue unaffected.
+        logInfo("[LIFECYCLE] onStop - pausing video", tag = "MAIN")
+        carlinkManager?.pauseVideo()
     }
 
     override fun onDestroy() {
@@ -300,32 +320,45 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Loads immersive mode preference and applies it if enabled.
+     * Loads display mode preference and applies it.
      * Uses synchronous SharedPreferences cache to avoid ANR.
      * Matches Flutter: main.dart lines 50-57
      */
-    private fun loadAndApplyImmersiveMode() {
+    private fun loadAndApplyDisplayMode() {
         // Read preference from sync cache (instant, no I/O blocking)
         // This ensures the viewport is correctly sized before the first build
-        isImmersiveModeEnabled = ImmersivePreference.getInstance(this).isEnabledSync()
+        currentDisplayMode = DisplayModePreference.getInstance(this).getDisplayModeSync()
 
-        if (isImmersiveModeEnabled) {
-            applyImmersiveMode()
-            logInfo("[IMMERSIVE] Enabled fullscreen immersive mode", tag = "MAIN")
-        } else {
-            logInfo("[IMMERSIVE] Non-immersive mode - AAOS managing system UI", tag = "MAIN")
-        }
+        applyDisplayMode(currentDisplayMode)
+        logInfo("[DISPLAY_MODE] Applied mode: ${currentDisplayMode.name}", tag = "MAIN")
     }
 
     /**
-     * Applies immersive fullscreen mode by hiding system bars.
-     * Only called when isImmersiveModeEnabled is true.
+     * Applies the specified display mode by showing/hiding system bars.
+     *
+     * @param mode The display mode to apply
      */
-    private fun applyImmersiveMode() {
+    private fun applyDisplayMode(mode: DisplayMode) {
         val windowInsetsController = WindowCompat.getInsetsController(window, window.decorView)
-        windowInsetsController.apply {
-            hide(WindowInsetsCompat.Type.systemBars())
-            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+
+        when (mode) {
+            DisplayMode.SYSTEM_UI_VISIBLE -> {
+                // Show all system bars - let AAOS manage display bounds
+                windowInsetsController.show(WindowInsetsCompat.Type.systemBars())
+            }
+            DisplayMode.STATUS_BAR_HIDDEN -> {
+                // Hide status bar only, keep navigation bar visible
+                windowInsetsController.hide(WindowInsetsCompat.Type.statusBars())
+                windowInsetsController.show(WindowInsetsCompat.Type.navigationBars())
+                windowInsetsController.systemBarsBehavior =
+                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+            DisplayMode.FULLSCREEN_IMMERSIVE -> {
+                // Hide all system bars for maximum projection area
+                windowInsetsController.hide(WindowInsetsCompat.Type.systemBars())
+                windowInsetsController.systemBarsBehavior =
+                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
         }
     }
 
@@ -382,7 +415,7 @@ class MainActivity : ComponentActivity() {
 fun CarlinkApp(
     carlinkManager: CarlinkManager,
     fileLogManager: FileLogManager?,
-    isImmersiveMode: Boolean,
+    displayMode: DisplayMode,
 ) {
     var showSettings by remember { mutableStateOf(false) }
 
@@ -403,7 +436,7 @@ fun CarlinkApp(
         // This keeps the SurfaceTexture alive and video playing uninterrupted
         MainScreen(
             carlinkManager = carlinkManager,
-            isImmersiveMode = isImmersiveMode,
+            displayMode = displayMode,
             onNavigateToSettings = {
                 logInfo("[UI_NAV] Opening SettingsScreen overlay (video continues)", tag = "UI")
                 showSettings = true

@@ -575,6 +575,100 @@ public class H264Renderer {
         }
     }
 
+    /**
+     * Pause video decoding when app goes to background.
+     *
+     * On AAOS, when the app is covered by another app, the Surface may remain valid
+     * but SurfaceFlinger stops consuming frames. This causes the BufferQueue to fill up,
+     * stalling the decoder. When the user returns, video appears blank.
+     *
+     * This method flushes the codec to clear pending buffers and prevents new frames
+     * from being queued until resume() is called.
+     *
+     * Call this from Activity.onStop() to prevent BufferQueue stalls.
+     */
+    public void pause() {
+        log("[LIFECYCLE] pause() called - flushing codec for background");
+
+        synchronized (codecLock) {
+            if (mCodec == null || !running) {
+                log("[LIFECYCLE] Codec not running, nothing to pause");
+                return;
+            }
+
+            try {
+                // Flush codec to clear all pending input/output buffers
+                // This prevents BufferQueue from filling up while in background
+                mCodec.flush();
+
+                // Clear our buffer tracking
+                synchronized (codecAvailableBufferIndexes) {
+                    codecAvailableBufferIndexes.clear();
+                }
+
+                // Clear ring buffer - stale data should not be decoded on resume
+                ringBuffer.reset();
+
+                log("[LIFECYCLE] Codec paused - buffers flushed, ready for background");
+            } catch (Exception e) {
+                log("[LIFECYCLE] pause() failed: " + e.toString());
+            }
+        }
+    }
+
+    /**
+     * Resume video decoding when app returns to foreground.
+     *
+     * After pause(), the codec is in a flushed state. This method restarts the codec
+     * and requests a keyframe so video can resume immediately.
+     *
+     * Call this from Activity.onStart() to resume video playback.
+     */
+    public void resume() {
+        log("[LIFECYCLE] resume() called - restarting codec for foreground");
+
+        synchronized (codecLock) {
+            if (mCodec == null) {
+                log("[LIFECYCLE] Codec is null, cannot resume");
+                return;
+            }
+
+            if (!running) {
+                log("[LIFECYCLE] Codec not running, triggering full start");
+                // Will be handled by normal start() flow
+                return;
+            }
+
+            try {
+                // Restart codec after flush (required in async mode)
+                mCodec.start();
+                codecStartTime = System.currentTimeMillis();
+
+                // Reset keyframe detection - we need a new IDR frame
+                framesReceivedSinceReset = 0;
+                framesDecodedSinceReset = 0;
+                resetTimestamp = System.currentTimeMillis();
+                pendingKeyframeRequest = true;
+
+                log("[LIFECYCLE] Codec resumed - awaiting keyframe");
+                VideoDebugLogger.logCodecStarted();
+            } catch (Exception e) {
+                log("[LIFECYCLE] resume() failed: " + e.toString() + " - will need full reset");
+            }
+        }
+
+        // Request keyframe outside lock to avoid deadlock
+        if (keyframeCallback != null) {
+            log("[LIFECYCLE] Requesting keyframe after resume");
+            try {
+                keyframeCallback.onKeyframeNeeded();
+                lastKeyframeRequestTime = System.currentTimeMillis();
+            } catch (Exception e) {
+                log("[LIFECYCLE] Keyframe request after resume failed: " + e.toString());
+            }
+        }
+    }
+
 
     private void initCodec(int width, int height, Surface surface) throws Exception {
         log("init media codec - Resolution: " + width + "x" + height);

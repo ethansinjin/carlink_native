@@ -33,3 +33,7 @@
 [19] :: Static Analysis warning fixes. Moved Mic from Timer to Coroutine. Though Coroutine uses a shared pool, so too many timers can cause issues.
 [20]: runBlocking ANR Risk and lateinit Crash fixed. carlinkManager nullable, the receiver needed null-safe access
 [21] :: Microphone Code reverted back. Timer works while coroutine does not for mic. Excessive debug logging in 'release'.
+[22] :: Auto reconnect attempt on adapter disconnect. Return to App Blank Video fixed? False success on file export in some scenarios, fixed? Some UI tweaks
+[23] :: Gradle Dependency updates. CarlinkMediaBrowserService now creates a foreground process in notification to hopefully keep app active. Also provide a shortcut to return to app, if it works. 
+[24] :: Song Metadata inconsistency fix maybe
+[25] :: App Display Mode Options. Now includes three options.

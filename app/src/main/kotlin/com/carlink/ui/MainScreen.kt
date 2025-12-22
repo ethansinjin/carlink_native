@@ -2,6 +2,12 @@ package com.carlink.ui
 
 import android.view.MotionEvent
 import android.view.Surface
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -54,6 +60,7 @@ import com.carlink.protocol.MessageSerializer
 import com.carlink.protocol.MultiTouchAction
 import com.carlink.ui.components.VideoSurface
 import com.carlink.ui.components.rememberVideoSurfaceState
+import com.carlink.ui.settings.DisplayMode
 import com.carlink.ui.theme.AutomotiveDimens
 import kotlinx.coroutines.launch
 
@@ -75,7 +82,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun MainScreen(
     carlinkManager: CarlinkManager,
-    isImmersiveMode: Boolean,
+    displayMode: DisplayMode,
     onNavigateToSettings: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -138,16 +145,16 @@ fun MainScreen(
     val isLoading = state != CarlinkManager.State.STREAMING
     val colorScheme = MaterialTheme.colorScheme
 
-    // Apply system bar insets only when NOT in immersive mode
+    // Apply system bar insets based on display mode
     // This matches Flutter's SafeArea behavior with _disableSafeArea flag:
-    // - Non-immersive: Apply insets to constrain video to usable area (1920x822)
-    // - Immersive: No insets, video fills entire screen (1920x1080)
+    // - FULLSCREEN_IMMERSIVE: No insets, video fills entire screen (1920x1080)
+    // - Other modes: Apply insets to constrain video to usable area
     val baseModifier = Modifier
         .fillMaxSize()
         .background(Color.Black)
 
-    val boxModifier = if (isImmersiveMode) {
-        baseModifier // No insets in immersive mode - fill entire screen
+    val boxModifier = if (displayMode == DisplayMode.FULLSCREEN_IMMERSIVE) {
+        baseModifier // No insets in fullscreen immersive mode - fill entire screen
     } else {
         baseModifier.windowInsetsPadding(WindowInsets.systemBars) // Apply insets
     }
@@ -261,10 +268,12 @@ fun MainScreen(
                     Text(
                         text = "Settings",
                         style = MaterialTheme.typography.titleLarge,
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                     )
                 }
 
-                // Reset button
+                // Reset button with animated icon transition
                 FilledTonalButton(
                     onClick = {
                         if (!isResetting) {
@@ -291,23 +300,33 @@ fun MainScreen(
                             vertical = AutomotiveDimens.ButtonPaddingVertical,
                         ),
                 ) {
-                    if (isResetting) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(AutomotiveDimens.IconSize),
-                            strokeWidth = 3.dp,
-                            color = colorScheme.onErrorContainer,
-                        )
-                    } else {
-                        Icon(
-                            imageVector = Icons.Default.RestartAlt,
-                            contentDescription = "Reset",
-                            modifier = Modifier.size(AutomotiveDimens.IconSize),
-                        )
+                    AnimatedContent(
+                        targetState = isResetting,
+                        transitionSpec = {
+                            (fadeIn() + scaleIn()).togetherWith(fadeOut() + scaleOut())
+                        },
+                        label = "resetIconTransition"
+                    ) { resetting ->
+                        if (resetting) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(AutomotiveDimens.IconSize),
+                                strokeWidth = 3.dp,
+                                color = colorScheme.onErrorContainer,
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.RestartAlt,
+                                contentDescription = "Reset Device",
+                                modifier = Modifier.size(AutomotiveDimens.IconSize),
+                            )
+                        }
                     }
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         text = "Reset Device",
                         style = MaterialTheme.typography.titleLarge,
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                     )
                 }
             }

@@ -11,6 +11,7 @@ import com.carlink.logging.logError
 import com.carlink.logging.logInfo
 import com.carlink.logging.logWarn
 import com.carlink.logging.logVideoUsb
+import com.carlink.media.CarlinkMediaBrowserService
 import com.carlink.media.MediaSessionManager
 import com.carlink.platform.AudioConfig
 import com.carlink.platform.PlatformDetector
@@ -69,6 +70,11 @@ class CarlinkManager(
         // Recovery constants (matches Flutter CarlinkPlugin.kt)
         private const val RESET_THRESHOLD = 3
         private const val RESET_WINDOW_MS = 30_000L
+
+        // Auto-reconnect constants
+        private const val MAX_RECONNECT_ATTEMPTS = 5
+        private const val INITIAL_RECONNECT_DELAY_MS = 2000L // Start with 2 seconds
+        private const val MAX_RECONNECT_DELAY_MS = 30000L // Cap at 30 seconds
     }
 
     /**
@@ -154,12 +160,25 @@ class CarlinkManager(
     private var lastResetTime: Long = 0
     private var consecutiveResets: Int = 0
 
+    // Auto-reconnect on USB disconnect
+    private var reconnectJob: Job? = null
+    private var reconnectAttempts: Int = 0
+
     // Media metadata tracking
     private var lastMediaSongName: String? = null
     private var lastMediaArtistName: String? = null
     private var lastMediaAlbumName: String? = null
     private var lastMediaAppName: String? = null
     private var lastAlbumCover: ByteArray? = null
+
+    /** Clears cached media metadata to prevent stale data on reconnect. */
+    private fun clearCachedMediaMetadata() {
+        lastMediaSongName = null
+        lastMediaArtistName = null
+        lastMediaAlbumName = null
+        lastMediaAppName = null
+        lastAlbumCover = null
+    }
 
     // Executors
     private val executors = AppExecutors()
@@ -401,7 +420,9 @@ class CarlinkManager(
         logDebug("[LIFECYCLE] stop() called - clearing frame interval and phoneType", tag = Logger.Tags.VIDEO)
         clearPairTimeout()
         stopFrameInterval()
+        cancelReconnect()  // Cancel any pending auto-reconnect
         currentPhoneType = null  // Clear phone type on disconnect
+        clearCachedMediaMetadata()  // Clear stale metadata to prevent race conditions on reconnect
         stopMicrophoneCapture()
 
         adapterDriver?.stop()
@@ -537,6 +558,41 @@ class CarlinkManager(
         logInfo("[VIDEO] Video decoder stopped - safe to destroy surface", tag = Logger.Tags.VIDEO)
     }
 
+    /**
+     * Pause video decoding when app goes to background.
+     *
+     * On AAOS, when the app is covered by another app (e.g., Maps, Phone), the Surface
+     * may remain valid but SurfaceFlinger stops consuming frames. This causes the
+     * BufferQueue to fill up, stalling the decoder. When the user returns, video
+     * appears blank while audio continues normally.
+     *
+     * This method flushes the codec to prevent BufferQueue stalls. The USB connection
+     * and audio playback continue unaffected.
+     *
+     * Call this from Activity.onStop().
+     */
+    fun pauseVideo() {
+        logInfo("[LIFECYCLE] Pausing video for background", tag = Logger.Tags.VIDEO)
+        h264Renderer?.pause()
+    }
+
+    /**
+     * Resume video decoding when app returns to foreground.
+     *
+     * After pauseVideo(), the codec is in a flushed state. This method restarts the
+     * codec and requests a keyframe so video can resume immediately.
+     *
+     * Call this from Activity.onStart().
+     */
+    fun resumeVideo() {
+        logInfo("[LIFECYCLE] Resuming video for foreground", tag = Logger.Tags.VIDEO)
+        h264Renderer?.resume()
+        // Also request keyframe through adapter if connected
+        if (state == State.STREAMING || state == State.DEVICE_CONNECTED) {
+            adapterDriver?.sendCommand(CommandMapping.FRAME)
+        }
+    }
+
     // ==================== Private Methods ====================
 
     private fun setState(newState: State) {
@@ -555,6 +611,13 @@ class CarlinkManager(
 
             State.DISCONNECTED -> {
                 mediaSessionManager?.setStateStopped()
+                // Stop foreground service when disconnected
+                CarlinkMediaBrowserService.stopConnectionForeground(context)
+            }
+
+            State.STREAMING -> {
+                // Start foreground service to keep app active when backgrounded
+                CarlinkMediaBrowserService.startConnectionForeground(context)
             }
 
             else -> {} // Playback state updated when audio starts
@@ -587,6 +650,9 @@ class CarlinkManager(
                 logInfo("[PLUGGED] Device plugged: phoneType=${message.phoneType}, wifi=${message.wifi}", tag = Logger.Tags.VIDEO)
                 clearPairTimeout()
                 stopFrameInterval()  // Stop any existing timer (clean slate)
+
+                // Reset reconnect attempts on successful connection
+                reconnectAttempts = 0
 
                 // Store phone type for frame interval decisions during recovery
                 currentPhoneType = message.phoneType
@@ -805,14 +871,20 @@ class CarlinkManager(
     private fun processMediaMetadata(message: MediaDataMessage) {
         val payload = message.payload
 
-        // Check for album cover
-        val albumCover = payload["AlbumCover"] as? ByteArray
-        if (albumCover != null) {
-            lastAlbumCover = albumCover
+        // Extract new song title (if present)
+        val newSongName = (payload["MediaSongName"] as? String)?.takeIf { it.isNotEmpty() }
+
+        // If song title changed, clear all cached metadata to prevent stale data mixing
+        if (newSongName != null && newSongName != lastMediaSongName) {
+            lastMediaSongName = null
+            lastMediaArtistName = null
+            lastMediaAlbumName = null
+            lastAlbumCover = null
+            // Keep appName - typically doesn't change mid-session
         }
 
         // Extract text metadata
-        (payload["MediaSongName"] as? String)?.takeIf { it.isNotEmpty() }?.let {
+        newSongName?.let {
             lastMediaSongName = it
         }
         (payload["MediaArtistName"] as? String)?.takeIf { it.isNotEmpty() }?.let {
@@ -823,6 +895,12 @@ class CarlinkManager(
         }
         (payload["MediaAPPName"] as? String)?.takeIf { it.isNotEmpty() }?.let {
             lastMediaAppName = it
+        }
+
+        // Process album cover after song change detection
+        val albumCover = payload["AlbumCover"] as? ByteArray
+        if (albumCover != null) {
+            lastAlbumCover = albumCover
         }
 
         val mediaInfo =
@@ -855,6 +933,7 @@ class CarlinkManager(
      * 2. Track consecutive resets within time window
      * 3. If threshold reached, perform emergency cleanup
      * 4. Otherwise, notify and let system recover naturally
+     * 5. For USB disconnects, schedule auto-reconnect with exponential backoff
      */
     private fun handleError(error: String) {
         clearPairTimeout()
@@ -876,6 +955,88 @@ class CarlinkManager(
 
         // Set state to disconnected
         setState(State.DISCONNECTED)
+
+        // Schedule auto-reconnect for USB disconnect errors
+        if (isUsbDisconnectError(error)) {
+            scheduleReconnect()
+        }
+    }
+
+    /**
+     * Checks if an error indicates USB disconnect (physical or transfer failure).
+     */
+    private fun isUsbDisconnectError(error: String): Boolean {
+        val lowerError = error.lowercase()
+        return lowerError.contains("disconnect") ||
+            lowerError.contains("detach") ||
+            lowerError.contains("transfer") ||
+            lowerError.contains("usb")
+    }
+
+    /**
+     * Schedule an auto-reconnect attempt with exponential backoff.
+     *
+     * After USB disconnect, attempts to reconnect automatically:
+     * - Attempt 1: 2 seconds delay
+     * - Attempt 2: 4 seconds delay
+     * - Attempt 3: 8 seconds delay
+     * - Attempt 4: 16 seconds delay
+     * - Attempt 5: 30 seconds delay (capped)
+     *
+     * Gives up after MAX_RECONNECT_ATTEMPTS to prevent infinite loops.
+     */
+    private fun scheduleReconnect() {
+        // Cancel any existing reconnect attempt
+        reconnectJob?.cancel()
+
+        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+            logWarn(
+                "[RECONNECT] Max attempts ($MAX_RECONNECT_ATTEMPTS) reached, giving up. " +
+                    "User must manually restart.",
+                tag = Logger.Tags.USB
+            )
+            reconnectAttempts = 0
+            return
+        }
+
+        // Calculate delay with exponential backoff, capped at max
+        val delay = minOf(
+            INITIAL_RECONNECT_DELAY_MS * (1L shl reconnectAttempts),
+            MAX_RECONNECT_DELAY_MS
+        )
+        reconnectAttempts++
+
+        logInfo(
+            "[RECONNECT] Scheduling attempt $reconnectAttempts/$MAX_RECONNECT_ATTEMPTS in ${delay}ms",
+            tag = Logger.Tags.USB
+        )
+
+        reconnectJob = scope.launch {
+            kotlinx.coroutines.delay(delay)
+
+            // Only attempt if still disconnected
+            if (state == State.DISCONNECTED) {
+                logInfo("[RECONNECT] Attempting reconnection...", tag = Logger.Tags.USB)
+                try {
+                    start()
+                } catch (e: Exception) {
+                    logError("[RECONNECT] Reconnection failed: ${e.message}", tag = Logger.Tags.USB)
+                    // handleError will be called by start() failure, which will schedule next attempt
+                }
+            } else {
+                logInfo("[RECONNECT] Already connected, cancelling reconnect", tag = Logger.Tags.USB)
+                reconnectAttempts = 0
+            }
+        }
+    }
+
+    /**
+     * Cancel any pending reconnect attempt.
+     */
+    private fun cancelReconnect() {
+        reconnectJob?.cancel()
+        reconnectJob = null
+        reconnectAttempts = 0
     }
 
     /**

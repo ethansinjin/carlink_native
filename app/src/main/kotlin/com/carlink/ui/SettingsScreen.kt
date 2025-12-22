@@ -6,6 +6,15 @@ import android.view.HapticFeedbackConstants
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -90,9 +99,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -105,9 +117,19 @@ import com.carlink.logging.apply
 import com.carlink.logging.logInfo
 import com.carlink.ui.settings.AdapterConfigPreference
 import com.carlink.ui.settings.AudioSourceConfig
-import com.carlink.ui.settings.ImmersivePreference
+import com.carlink.ui.settings.DisplayMode
+import com.carlink.ui.settings.DisplayModePreference
 import com.carlink.ui.settings.SettingsTab
 import com.carlink.ui.theme.AutomotiveDimens
+import androidx.activity.ComponentActivity
+import androidx.compose.runtime.DisposableEffect
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.Layers
+import androidx.compose.ui.text.style.TextAlign
 import kotlinx.coroutines.launch
 import java.io.File
 import java.text.SimpleDateFormat
@@ -287,16 +309,24 @@ private fun ControlTabContent(carlinkManager: CarlinkManager) {
     // Check device connection state - Matches Flutter _isDeviceConnected()
     val isDeviceConnected = carlinkManager.state != CarlinkManager.State.DISCONNECTED
 
-    // Immersive mode preference
-    val immersivePreference = remember { ImmersivePreference.getInstance(context) }
-    val isImmersiveEnabled by immersivePreference.isEnabledFlow.collectAsStateWithLifecycle(initialValue = false)
-    var showRestartDialog by remember { mutableStateOf(false) }
+    // Display mode preference
+    val displayModePreference = remember { DisplayModePreference.getInstance(context) }
+    val currentDisplayMode by displayModePreference.displayModeFlow.collectAsStateWithLifecycle(
+        initialValue = DisplayMode.SYSTEM_UI_VISIBLE
+    )
+    var showDisplayModeDialog by remember { mutableStateOf(false) }
 
     // Adapter configuration preference
     val adapterConfigPreference = remember { AdapterConfigPreference.getInstance(context) }
     var showAdapterConfigDialog by remember { mutableStateOf(false) }
 
-    // Centered scrollable content with max width constraint
+    // Responsive max width - 75% of container width, clamped between 400dp and 1200dp
+    val windowInfo = LocalWindowInfo.current
+    val density = LocalDensity.current
+    val containerWidthDp = with(density) { windowInfo.containerSize.width.toDp() }
+    val maxContentWidth = (containerWidthDp * 0.75f).coerceIn(400.dp, 1200.dp)
+
+    // Centered scrollable content with responsive max width constraint
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.TopCenter,
@@ -304,7 +334,7 @@ private fun ControlTabContent(carlinkManager: CarlinkManager) {
         Column(
             modifier =
                 Modifier
-                    .widthIn(max = 900.dp)
+                    .widthIn(max = maxContentWidth)
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState())
                     .padding(24.dp),
@@ -390,41 +420,37 @@ private fun ControlTabContent(carlinkManager: CarlinkManager) {
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
             ) {
-                // Display Control Card - Matches Flutter _buildDisplayControlCard
+                // Display Control Card - Display mode configuration
                 ControlCard(
                     modifier = Modifier.weight(1f),
-                    title = "Display Control",
+                    title = "Display Mode",
                     icon = Icons.Default.DisplaySettings,
                 ) {
-                    // Immersive Mode Toggle
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
+                    // Configure button showing current mode
+                    FilledTonalButton(
+                        onClick = { showDisplayModeDialog = true },
+                        modifier = Modifier.fillMaxWidth().height(AutomotiveDimens.ButtonMinHeight),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Immersive Fullscreen",
-                                style = MaterialTheme.typography.titleMedium,
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text =
-                                    if (isImmersiveEnabled) {
-                                        "Active"
-                                    } else {
-                                        "System UI managed"
-                                    },
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Switch(
-                            checked = isImmersiveEnabled,
-                            enabled = !isProcessing,
-                            onCheckedChange = { enabled ->
-                                showRestartDialog = true
+                        Icon(
+                            imageVector = when (currentDisplayMode) {
+                                DisplayMode.SYSTEM_UI_VISIBLE -> Icons.Default.FullscreenExit
+                                DisplayMode.STATUS_BAR_HIDDEN -> Icons.Default.Layers
+                                DisplayMode.FULLSCREEN_IMMERSIVE -> Icons.Default.Fullscreen
                             },
+                            contentDescription = "Configure display mode",
+                            modifier = Modifier.size(AutomotiveDimens.IconSize),
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = when (currentDisplayMode) {
+                                DisplayMode.SYSTEM_UI_VISIBLE -> "System UI"
+                                DisplayMode.STATUS_BAR_HIDDEN -> "Hide Status"
+                                DisplayMode.FULLSCREEN_IMMERSIVE -> "Fullscreen"
+                            },
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                         )
                     }
                 }
@@ -438,16 +464,21 @@ private fun ControlTabContent(carlinkManager: CarlinkManager) {
                     // Configure button
                     FilledTonalButton(
                         onClick = { showAdapterConfigDialog = true },
-                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                        modifier = Modifier.fillMaxWidth().height(AutomotiveDimens.ButtonMinHeight),
                         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
                     ) {
                         Icon(
                             imageVector = Icons.Default.Settings,
-                            contentDescription = null,
-                            modifier = Modifier.size(20.dp),
+                            contentDescription = "Configure adapter",
+                            modifier = Modifier.size(AutomotiveDimens.IconSize),
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Configure", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            text = "Configure",
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        )
                     }
                 }
             }
@@ -462,50 +493,20 @@ private fun ControlTabContent(carlinkManager: CarlinkManager) {
         )
     }
 
-    // Restart Required Dialog - Matches Flutter _handleImmersiveModeToggle exactly
-    if (showRestartDialog) {
-        AlertDialog(
-            onDismissRequest = { showRestartDialog = false },
-            icon = {
-                Icon(
-                    imageVector = Icons.Default.RestartAlt,
-                    contentDescription = null,
-                    tint = colorScheme.primary,
-                    modifier = Modifier.size(24.dp),
-                )
-            },
-            title = {
-                Text(
-                    "Restart Required",
-                    style = MaterialTheme.typography.headlineSmall,
-                )
-            },
-            text = {
-                Text(
-                    "App must restart to apply immersive mode changes.\n\nThe app will close and must be relaunched manually.",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        showRestartDialog = false
-                        scope.launch {
-                            // Toggle the preference
-                            immersivePreference.setEnabled(!isImmersiveEnabled)
-                            // Stop adapter and exit
-                            carlinkManager.stop()
-                            kotlinx.coroutines.delay(500)
-                            android.os.Process.killProcess(android.os.Process.myPid())
-                        }
-                    },
-                ) {
-                    Text("Restart Now")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showRestartDialog = false }) {
-                    Text("Cancel")
+    // Display Mode Dialog with live preview
+    if (showDisplayModeDialog) {
+        DisplayModeDialog(
+            displayModePreference = displayModePreference,
+            onDismiss = { showDisplayModeDialog = false },
+            onApplyAndRestart = { newMode ->
+                showDisplayModeDialog = false
+                scope.launch {
+                    // Save the new display mode
+                    displayModePreference.setDisplayMode(newMode)
+                    // Stop adapter and exit
+                    carlinkManager.stop()
+                    kotlinx.coroutines.delay(500)
+                    android.os.Process.killProcess(android.os.Process.myPid())
                 }
             },
         )
@@ -548,6 +549,9 @@ private fun ControlCard(
                         MaterialTheme.typography.headlineSmall.copy(
                             fontWeight = FontWeight.SemiBold,
                         ),
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
                 )
             }
 
@@ -559,7 +563,7 @@ private fun ControlCard(
 }
 
 /**
- * Material 3 Control Button
+ * Material 3 Control Button with animated state transitions
  */
 @Composable
 private fun ControlButton(
@@ -572,6 +576,12 @@ private fun ControlButton(
 ) {
     val colorScheme = MaterialTheme.colorScheme
 
+    // Animated alpha for disabled state
+    val contentAlpha by animateFloatAsState(
+        targetValue = if (enabled && !isProcessing) 1f else 0.7f,
+        label = "buttonAlpha"
+    )
+
     when (severity) {
         ButtonSeverity.DESTRUCTIVE -> {
             Button(
@@ -580,7 +590,7 @@ private fun ControlButton(
                 modifier =
                     Modifier
                         .fillMaxWidth()
-                        .height(56.dp),
+                        .height(AutomotiveDimens.ButtonMinHeight),
                 colors =
                     ButtonDefaults.buttonColors(
                         containerColor = colorScheme.error,
@@ -588,21 +598,34 @@ private fun ControlButton(
                     ),
                 contentPadding = PaddingValues(horizontal = 24.dp, vertical = 16.dp),
             ) {
-                if (isProcessing) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(24.dp),
-                        strokeWidth = 2.5.dp,
-                        color = colorScheme.onError,
-                    )
-                } else {
-                    Icon(
-                        imageVector = icon,
-                        contentDescription = null,
-                        modifier = Modifier.size(24.dp),
-                    )
+                AnimatedContent(
+                    targetState = isProcessing,
+                    transitionSpec = {
+                        (fadeIn() + scaleIn()).togetherWith(fadeOut() + scaleOut())
+                    },
+                    label = "iconTransition"
+                ) { processing ->
+                    if (processing) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(24.dp),
+                            strokeWidth = 2.5.dp,
+                            color = colorScheme.onError,
+                        )
+                    } else {
+                        Icon(
+                            imageVector = icon,
+                            contentDescription = label,
+                            modifier = Modifier.size(24.dp),
+                        )
+                    }
                 }
                 Spacer(modifier = Modifier.width(8.dp))
-                Text(label, style = MaterialTheme.typography.titleMedium)
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                )
             }
         }
 
@@ -613,7 +636,7 @@ private fun ControlButton(
                 modifier =
                     Modifier
                         .fillMaxWidth()
-                        .height(56.dp),
+                        .height(AutomotiveDimens.ButtonMinHeight),
                 colors =
                     ButtonDefaults.filledTonalButtonColors(
                         containerColor = colorScheme.tertiaryContainer,
@@ -621,20 +644,33 @@ private fun ControlButton(
                     ),
                 contentPadding = PaddingValues(horizontal = 24.dp, vertical = 16.dp),
             ) {
-                if (isProcessing) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(24.dp),
-                        strokeWidth = 2.5.dp,
-                    )
-                } else {
-                    Icon(
-                        imageVector = icon,
-                        contentDescription = null,
-                        modifier = Modifier.size(24.dp),
-                    )
+                AnimatedContent(
+                    targetState = isProcessing,
+                    transitionSpec = {
+                        (fadeIn() + scaleIn()).togetherWith(fadeOut() + scaleOut())
+                    },
+                    label = "iconTransition"
+                ) { processing ->
+                    if (processing) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(24.dp),
+                            strokeWidth = 2.5.dp,
+                        )
+                    } else {
+                        Icon(
+                            imageVector = icon,
+                            contentDescription = label,
+                            modifier = Modifier.size(24.dp),
+                        )
+                    }
                 }
                 Spacer(modifier = Modifier.width(8.dp))
-                Text(label, style = MaterialTheme.typography.titleMedium)
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                )
             }
         }
 
@@ -645,23 +681,36 @@ private fun ControlButton(
                 modifier =
                     Modifier
                         .fillMaxWidth()
-                        .height(56.dp),
+                        .height(AutomotiveDimens.ButtonMinHeight),
                 contentPadding = PaddingValues(horizontal = 24.dp, vertical = 16.dp),
             ) {
-                if (isProcessing) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(24.dp),
-                        strokeWidth = 2.5.dp,
-                    )
-                } else {
-                    Icon(
-                        imageVector = icon,
-                        contentDescription = null,
-                        modifier = Modifier.size(24.dp),
-                    )
+                AnimatedContent(
+                    targetState = isProcessing,
+                    transitionSpec = {
+                        (fadeIn() + scaleIn()).togetherWith(fadeOut() + scaleOut())
+                    },
+                    label = "iconTransition"
+                ) { processing ->
+                    if (processing) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(24.dp),
+                            strokeWidth = 2.5.dp,
+                        )
+                    } else {
+                        Icon(
+                            imageVector = icon,
+                            contentDescription = label,
+                            modifier = Modifier.size(24.dp),
+                        )
+                    }
                 }
                 Spacer(modifier = Modifier.width(8.dp))
-                Text(label, style = MaterialTheme.typography.titleMedium)
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                )
             }
         }
     }
@@ -704,12 +753,18 @@ private fun AdapterConfigurationDialog(
     // Track if any changes were made
     val hasChanges = selectedAudioSource != savedAudioSource
 
+    // Responsive dialog width - 60% of container width, clamped between 320dp and 600dp
+    val windowInfo = LocalWindowInfo.current
+    val density = LocalDensity.current
+    val containerWidthDp = with(density) { windowInfo.containerSize.width.toDp() }
+    val dialogMaxWidth = (containerWidthDp * 0.6f).coerceIn(320.dp, 600.dp)
+
     Dialog(onDismissRequest = onDismiss) {
         Surface(
             shape = MaterialTheme.shapes.extraLarge,
             color = colorScheme.surfaceContainerHigh,
             tonalElevation = 6.dp,
-            modifier = Modifier.widthIn(max = 500.dp),
+            modifier = Modifier.widthIn(max = dialogMaxWidth),
         ) {
             Column(
                 modifier = Modifier.padding(24.dp),
@@ -919,7 +974,7 @@ private fun ConfigurationOptionCard(
 /**
  * Audio Source Selection Button
  *
- * Toggle button with visual indicator for selected state.
+ * Toggle button with animated visual indicator for selected state.
  */
 @Composable
 private fun AudioSourceButton(
@@ -931,14 +986,36 @@ private fun AudioSourceButton(
 ) {
     val colorScheme = MaterialTheme.colorScheme
 
+    // Animated properties for smooth selection transitions
+    val backgroundColor by animateColorAsState(
+        targetValue = if (isSelected) colorScheme.primaryContainer else colorScheme.surfaceContainer,
+        label = "backgroundColor"
+    )
+    val borderWidth by animateDpAsState(
+        targetValue = if (isSelected) 2.dp else 1.dp,
+        label = "borderWidth"
+    )
+    val borderColor by animateColorAsState(
+        targetValue = if (isSelected) colorScheme.primary else colorScheme.outline,
+        label = "borderColor"
+    )
+    val contentColor by animateColorAsState(
+        targetValue = if (isSelected) colorScheme.primary else colorScheme.onSurfaceVariant,
+        label = "contentColor"
+    )
+    val iconScale by animateFloatAsState(
+        targetValue = if (isSelected) 1.1f else 1f,
+        label = "iconScale"
+    )
+
     Surface(
         onClick = onClick,
-        modifier = modifier.height(72.dp),
+        modifier = modifier.height(AutomotiveDimens.ButtonMinHeight),
         shape = MaterialTheme.shapes.medium,
-        color = if (isSelected) colorScheme.primaryContainer else colorScheme.surfaceContainer,
+        color = backgroundColor,
         border = BorderStroke(
-            width = if (isSelected) 2.dp else 1.dp,
-            color = if (isSelected) colorScheme.primary else colorScheme.outline,
+            width = borderWidth,
+            color = borderColor,
         ),
     ) {
         Column(
@@ -950,9 +1027,11 @@ private fun AudioSourceButton(
         ) {
             Icon(
                 imageVector = icon,
-                contentDescription = null,
-                tint = if (isSelected) colorScheme.primary else colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(24.dp),
+                contentDescription = label,
+                tint = contentColor,
+                modifier = Modifier
+                    .size(24.dp)
+                    .graphicsLayer { scaleX = iconScale; scaleY = iconScale },
             )
             Spacer(modifier = Modifier.height(4.dp))
             Text(
@@ -960,7 +1039,313 @@ private fun AudioSourceButton(
                 style = MaterialTheme.typography.labelLarge.copy(
                     fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
                 ),
-                color = if (isSelected) colorScheme.primary else colorScheme.onSurfaceVariant,
+                color = contentColor,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+// ==================== DISPLAY MODE DIALOG ====================
+
+/**
+ * Display Mode Dialog with Live Preview
+ *
+ * Allows users to select between three display modes with instant visual preview.
+ * Changes are previewed immediately by toggling system bars, but require restart
+ * to properly reconfigure video surface dimensions.
+ *
+ * Modes:
+ * - SYSTEM_UI_VISIBLE: Both status bar and navigation bar always visible
+ * - STATUS_BAR_HIDDEN: Only status bar hidden, navigation bar remains visible
+ * - FULLSCREEN_IMMERSIVE: Both bars hidden, swipe to reveal temporarily
+ */
+@Composable
+private fun DisplayModeDialog(
+    displayModePreference: DisplayModePreference,
+    onDismiss: () -> Unit,
+    onApplyAndRestart: (DisplayMode) -> Unit,
+) {
+    val colorScheme = MaterialTheme.colorScheme
+    val context = LocalContext.current
+
+    // Get window for live preview
+    val window = (context as? ComponentActivity)?.window
+
+    // Load saved mode from preferences
+    val savedMode by displayModePreference.displayModeFlow.collectAsStateWithLifecycle(
+        initialValue = DisplayMode.SYSTEM_UI_VISIBLE
+    )
+
+    // Local state for preview - allows cancel without saving
+    var selectedMode by remember { mutableStateOf(savedMode) }
+
+    // Sync local state when saved value loads (for initial load)
+    LaunchedEffect(savedMode) {
+        selectedMode = savedMode
+    }
+
+    // LIVE PREVIEW: Apply mode instantly when selection changes
+    LaunchedEffect(selectedMode) {
+        window?.let { applyDisplayModePreview(it, selectedMode) }
+    }
+
+    // Restore original mode when dialog dismissed without saving
+    DisposableEffect(Unit) {
+        onDispose {
+            window?.let { applyDisplayModePreview(it, savedMode) }
+        }
+    }
+
+    val hasChanges = selectedMode != savedMode
+
+    // Responsive dialog width - 60% of container width, clamped between 320dp and 600dp
+    val windowInfo = LocalWindowInfo.current
+    val density = LocalDensity.current
+    val containerWidthDp = with(density) { windowInfo.containerSize.width.toDp() }
+    val dialogMaxWidth = (containerWidthDp * 0.6f).coerceIn(320.dp, 600.dp)
+
+    Dialog(onDismissRequest = {
+        // Restore original mode on cancel
+        window?.let { applyDisplayModePreview(it, savedMode) }
+        onDismiss()
+    }) {
+        Surface(
+            shape = MaterialTheme.shapes.extraLarge,
+            color = colorScheme.surfaceContainerHigh,
+            tonalElevation = 6.dp,
+            modifier = Modifier.widthIn(max = dialogMaxWidth),
+        ) {
+            Column(
+                modifier = Modifier.padding(24.dp),
+            ) {
+                // Header with icon and title
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Fullscreen,
+                        contentDescription = null,
+                        tint = colorScheme.primary,
+                        modifier = Modifier.size(28.dp),
+                    )
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Text(
+                        text = "Display Mode",
+                        style = MaterialTheme.typography.headlineSmall.copy(
+                            fontWeight = FontWeight.Bold,
+                        ),
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Subtitle with preview indicator
+                Text(
+                    text = "Preview changes instantly • Restart required to apply",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = colorScheme.onSurfaceVariant,
+                )
+
+                Spacer(modifier = Modifier.height(20.dp))
+
+                // Scrollable content area
+                Column(
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                ) {
+                    // Configuration option card
+                    ConfigurationOptionCard(
+                        title = "App Immersion",
+                        description = "Control system UI visibility during projection",
+                        icon = Icons.Default.Layers,
+                    ) {
+                        // Three mode buttons in a row
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            DisplayModeButton(
+                                label = "System UI",
+                                icon = Icons.Default.FullscreenExit,
+                                isSelected = selectedMode == DisplayMode.SYSTEM_UI_VISIBLE,
+                                onClick = { selectedMode = DisplayMode.SYSTEM_UI_VISIBLE },
+                                modifier = Modifier.weight(1f),
+                            )
+                            DisplayModeButton(
+                                label = "Hide Status",
+                                icon = Icons.Default.Layers,
+                                isSelected = selectedMode == DisplayMode.STATUS_BAR_HIDDEN,
+                                onClick = { selectedMode = DisplayMode.STATUS_BAR_HIDDEN },
+                                modifier = Modifier.weight(1f),
+                            )
+                            DisplayModeButton(
+                                label = "Fullscreen",
+                                icon = Icons.Default.Fullscreen,
+                                isSelected = selectedMode == DisplayMode.FULLSCREEN_IMMERSIVE,
+                                onClick = { selectedMode = DisplayMode.FULLSCREEN_IMMERSIVE },
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+
+                        // Description for selected mode
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = when (selectedMode) {
+                                DisplayMode.SYSTEM_UI_VISIBLE ->
+                                    "Status bar and navigation always visible. AAOS manages display bounds."
+                                DisplayMode.STATUS_BAR_HIDDEN ->
+                                    "Status bar hidden, navigation bar visible. Extra vertical space."
+                                DisplayMode.FULLSCREEN_IMMERSIVE ->
+                                    "All system UI hidden. Swipe edge to temporarily reveal."
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colorScheme.primary,
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
+
+                // Footer with action buttons
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    // Cancel - restores original mode
+                    TextButton(
+                        onClick = {
+                            window?.let { applyDisplayModePreview(it, savedMode) }
+                            onDismiss()
+                        },
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("Cancel")
+                    }
+
+                    // Apply & Restart
+                    Button(
+                        onClick = { onApplyAndRestart(selectedMode) },
+                        modifier = Modifier.weight(1.5f),
+                        enabled = hasChanges,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.RestartAlt,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Apply & Restart")
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Applies the display mode preview by showing/hiding system bars.
+ * Used for instant visual feedback in the DisplayModeDialog.
+ */
+private fun applyDisplayModePreview(window: android.view.Window, mode: DisplayMode) {
+    val controller = WindowCompat.getInsetsController(window, window.decorView)
+
+    when (mode) {
+        DisplayMode.SYSTEM_UI_VISIBLE -> {
+            // Show all system bars - let AAOS manage display bounds
+            controller.show(WindowInsetsCompat.Type.systemBars())
+        }
+        DisplayMode.STATUS_BAR_HIDDEN -> {
+            // Hide status bar only, keep navigation bar visible
+            controller.hide(WindowInsetsCompat.Type.statusBars())
+            controller.show(WindowInsetsCompat.Type.navigationBars())
+            controller.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+        DisplayMode.FULLSCREEN_IMMERSIVE -> {
+            // Hide all system bars for maximum projection area
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+            controller.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+    }
+}
+
+/**
+ * Display Mode Selection Button
+ *
+ * Toggle button with animated visual indicator for selected state.
+ * Styled to match AudioSourceButton for consistency.
+ */
+@Composable
+private fun DisplayModeButton(
+    label: String,
+    icon: ImageVector,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colorScheme = MaterialTheme.colorScheme
+
+    // Animated properties for smooth selection transitions
+    val backgroundColor by animateColorAsState(
+        targetValue = if (isSelected) colorScheme.primaryContainer else colorScheme.surfaceContainer,
+        label = "backgroundColor"
+    )
+    val borderWidth by animateDpAsState(
+        targetValue = if (isSelected) 2.dp else 1.dp,
+        label = "borderWidth"
+    )
+    val borderColor by animateColorAsState(
+        targetValue = if (isSelected) colorScheme.primary else colorScheme.outline,
+        label = "borderColor"
+    )
+    val contentColor by animateColorAsState(
+        targetValue = if (isSelected) colorScheme.primary else colorScheme.onSurfaceVariant,
+        label = "contentColor"
+    )
+    val iconScale by animateFloatAsState(
+        targetValue = if (isSelected) 1.1f else 1f,
+        label = "iconScale"
+    )
+
+    Surface(
+        onClick = onClick,
+        modifier = modifier.height(AutomotiveDimens.ButtonMinHeight),
+        shape = MaterialTheme.shapes.medium,
+        color = backgroundColor,
+        border = BorderStroke(
+            width = borderWidth,
+            color = borderColor,
+        ),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = label,
+                tint = contentColor,
+                modifier = Modifier
+                    .size(22.dp)
+                    .graphicsLayer { scaleX = iconScale; scaleY = iconScale },
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium.copy(
+                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                ),
+                color = contentColor,
+                maxLines = 1,
+                textAlign = TextAlign.Center,
             )
         }
     }
@@ -999,12 +1384,18 @@ private fun LogsTabContent(
                     try {
                         val file = pendingExportFile!!
                         val bytes = file.readBytes()
-                        context.contentResolver.openOutputStream(uri)?.use { outputStream ->
-                            outputStream.write(bytes)
-                            outputStream.flush()
+                        val outputStream = context.contentResolver.openOutputStream(uri)
+                        if (outputStream != null) {
+                            outputStream.use {
+                                it.write(bytes)
+                                it.flush()
+                            }
+                            logInfo("[FILE_EXPORT] Successfully exported ${file.name} (${bytes.size} bytes)", tag = "FILE_LOG")
+                            Toast.makeText(context, "Exported: ${file.name}", Toast.LENGTH_SHORT).show()
+                        } else {
+                            logInfo("[FILE_EXPORT] Export failed: Could not open output stream", tag = "FILE_LOG")
+                            Toast.makeText(context, "Export failed: Could not write to location", Toast.LENGTH_SHORT).show()
                         }
-                        logInfo("[FILE_EXPORT] Successfully exported ${file.name} (${bytes.size} bytes)", tag = "FILE_LOG")
-                        Toast.makeText(context, "Exported: ${file.name}", Toast.LENGTH_SHORT).show()
                     } catch (e: Exception) {
                         logInfo("[FILE_EXPORT] Export failed: ${e.message}", tag = "FILE_LOG")
                         Toast.makeText(context, "Export failed: ${e.message}", Toast.LENGTH_SHORT).show()
@@ -1054,7 +1445,13 @@ private fun LogsTabContent(
         return
     }
 
-    // Centered scrollable content with max width constraint
+    // Responsive max width - 75% of container width, clamped between 400dp and 1200dp
+    val windowInfo = LocalWindowInfo.current
+    val density = LocalDensity.current
+    val containerWidthDp = with(density) { windowInfo.containerSize.width.toDp() }
+    val maxContentWidth = (containerWidthDp * 0.75f).coerceIn(400.dp, 1200.dp)
+
+    // Centered scrollable content with responsive max width constraint
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.TopCenter,
@@ -1062,7 +1459,7 @@ private fun LogsTabContent(
         Column(
             modifier =
                 Modifier
-                    .widthIn(max = 900.dp)
+                    .widthIn(max = maxContentWidth)
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState())
                     .padding(24.dp),
@@ -1732,6 +2129,9 @@ private fun LoggingControlCard(
                         MaterialTheme.typography.headlineSmall.copy(
                             fontWeight = FontWeight.SemiBold,
                         ),
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
                 )
             }
 
@@ -1786,12 +2186,15 @@ private fun LogFileItem(
                             fontWeight = FontWeight.Medium,
                         ),
                     maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                 )
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
                     text = "${formatFileSize(file.length())} • ${dateFormat.format(Date(file.lastModified()))}",
                     style = MaterialTheme.typography.bodySmall,
                     color = colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                 )
             }
 
