@@ -374,19 +374,22 @@ public class H264Renderer {
             return false;
         }
 
-        ByteBuffer packet = ringBuffer.readPacket();
-
-        // Copy packet data to codec input buffer
+        // OPTIMIZATION: Use readPacketInto() for direct single-copy from ring buffer to codec buffer
+        // This eliminates the intermediate byte[] allocation that readPacket() requires.
         // Note: BUFFER_FLAG_CODEC_CONFIG is NOT used because packets may contain
         // combined SPS+PPS+IDR data. The codec auto-detects config data from the
-        // H.264 NAL unit headers. Using CODEC_CONFIG on combined packets causes
-        // the codec to discard the IDR frame, breaking subsequent P-frame decoding.
-        byteBuffer.put(packet);
+        // H.264 NAL unit headers.
+        int bytesWritten = ringBuffer.readPacketInto(byteBuffer);
+        if (bytesWritten == 0) {
+            // No packet available or error - return index for later use
+            codecAvailableBufferIndexes.offer(index);
+            return false;
+        }
 
         // Use monotonic presentation timestamp for proper frame ordering
         long pts = presentationTimeUs.getAndAdd(FRAME_DURATION_US);
 
-        mCodec.queueInputBuffer(index, 0, byteBuffer.position(), pts, 0);
+        mCodec.queueInputBuffer(index, 0, bytesWritten, pts, 0);
 
         return true;
     }
@@ -1170,13 +1173,16 @@ public class H264Renderer {
                                 return;
                             }
 
-                            ByteBuffer packet = ringBuffer.readPacket();
-
-                            // Copy packet data to codec input buffer
+                            // OPTIMIZATION: Use readPacketInto() for direct single-copy from ring buffer to codec buffer
+                            // This eliminates the intermediate byte[] allocation that readPacket() requires.
                             // Note: flags=0 because combined SPS+PPS+IDR packets should not be
                             // flagged as CODEC_CONFIG (codec auto-detects from NAL headers)
-                            byteBuffer.put(packet);
-                            int dataSize = byteBuffer.position();
+                            int dataSize = ringBuffer.readPacketInto(byteBuffer);
+                            if (dataSize == 0) {
+                                // No packet or error - save index for later
+                                codecAvailableBufferIndexes.offer(index);
+                                return;
+                            }
 
                             // Use monotonic presentation timestamp for proper frame ordering
                             long pts = presentationTimeUs.getAndAdd(FRAME_DURATION_US);

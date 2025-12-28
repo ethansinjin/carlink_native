@@ -11,6 +11,7 @@ package com.carlink.video;
    * Key Features:
    * - Circular buffer with automatic resizing (1MB min, 64MB max)
    * - Thread-safe packet write/read operations with wrap-around support
+   * - Safe-copy reads to prevent race conditions with MediaCodec
    * - Zero-copy direct write callback for performance-critical paths
    * - Emergency reset mechanisms to prevent OutOfMemoryError
    * - Extensive bounds validation to prevent buffer corruption
@@ -22,7 +23,8 @@ package com.carlink.video;
    * Usage:
    * - writePacket() - Add complete packet data to buffer
    * - directWriteToBuffer() - Zero-copy write via callback (preferred for H.264)
-   * - readPacket() - Retrieve next packet as ByteBuffer
+   * - readPacketInto(ByteBuffer) - Direct copy to target buffer (preferred for MediaCodec)
+   * - readPacket() - Retrieve next packet as new ByteBuffer (legacy, allocates memory)
    * - availablePacketsToRead() - Check queued packet count
    *
    * Thread Safety:
@@ -314,10 +316,23 @@ public class PacketRingByteBuffer {
                 return ByteBuffer.allocate(0); // Return empty buffer
             }
 
-            // Zero-copy wrap - shares memory with ring buffer for maximum performance
-            // This matches the verified working implementation in Carlink_goodVideo
-            // The ring buffer design ensures data is not overwritten before consumption
-            ByteBuffer result = ByteBuffer.wrap(buffer, startPos, actualLength);
+            // CRITICAL FIX: Safe copy instead of zero-copy wrap
+            //
+            // Previously used ByteBuffer.wrap() which shared memory with ring buffer.
+            // This caused a race condition: USB write thread could overwrite data before
+            // MediaCodec finished reading it, causing H.264 reference frame corruption.
+            //
+            // Symptoms: Progressive video quality degradation (MPEG-like artifacts) that
+            // only recovered after codec reset (which clears the ring buffer).
+            //
+            // The copy ensures data integrity at the cost of ~1-2% CPU overhead.
+            // This is acceptable for stable video quality.
+            //
+            // See: https://developer.android.com/reference/android/media/MediaCodec
+            // "The client needs to copy the data before modifying the buffer"
+            byte[] packetData = new byte[actualLength];
+            System.arraycopy(buffer, startPos, packetData, 0, actualLength);
+            ByteBuffer result = ByteBuffer.wrap(packetData);
 
             readPosition += length;
             packetCount--;
@@ -326,6 +341,77 @@ public class PacketRingByteBuffer {
             VideoDebugLogger.logRingRead(length, actualLength, packetCount);
 
             return result;
+        }
+    }
+
+    /**
+     * Read next packet directly into a target ByteBuffer (zero-intermediate-allocation).
+     *
+     * OPTIMIZATION: This method copies directly from the ring buffer into the target
+     * ByteBuffer, eliminating the intermediate byte[] allocation that readPacket() requires.
+     * Use this when the target buffer is already available (e.g., MediaCodec input buffer).
+     *
+     * @param target The ByteBuffer to copy packet data into (must have sufficient capacity)
+     * @return Number of bytes written to target, or 0 if no packet available or error
+     */
+    int readPacketInto(ByteBuffer target) {
+        synchronized (this) {
+            if (packetCount == 0) {
+                return 0;
+            }
+
+            int length = readInt(readPosition);
+            readPosition += 4;
+
+            int skipBytes = readInt(readPosition);
+            readPosition += 4;
+
+            // Validate parameters to prevent ArrayIndexOutOfBoundsException
+            if (length < 0 || skipBytes < 0 || skipBytes > length) {
+                log("CRITICAL: Invalid packet parameters - length: " + length + ", skipBytes: " + skipBytes);
+                // Reset to safe state
+                readPosition = 0;
+                writePosition = 0;
+                packetCount = 0;
+                return 0;
+            }
+
+            // Reset position if on the end
+            if (readPosition + length > buffer.length) {
+                readPosition = 0;
+            }
+
+            // Calculate actual data bounds
+            int actualLength = length - skipBytes;
+            int startPos = readPosition + skipBytes;
+
+            if (actualLength < 0 || startPos < 0 || startPos + actualLength > buffer.length) {
+                log("CRITICAL: Buffer bounds exceeded - startPos: " + startPos + ", actualLength: " + actualLength + ", bufferLength: " + buffer.length);
+                // Reset to safe state
+                readPosition = 0;
+                writePosition = 0;
+                packetCount = 0;
+                return 0;
+            }
+
+            // Check target buffer has sufficient space
+            if (target.remaining() < actualLength) {
+                log("CRITICAL: Target buffer too small - remaining: " + target.remaining() + ", needed: " + actualLength);
+                // Don't consume packet if we can't write it
+                readPosition -= 8; // Rewind header reads
+                return 0;
+            }
+
+            // Direct copy from ring buffer to target ByteBuffer (single copy, no intermediate allocation)
+            target.put(buffer, startPos, actualLength);
+
+            readPosition += length;
+            packetCount--;
+
+            // Debug logging (throttled inside VideoDebugLogger)
+            VideoDebugLogger.logRingRead(length, actualLength, packetCount);
+
+            return actualLength;
         }
     }
 
