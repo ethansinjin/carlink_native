@@ -41,3 +41,4 @@
 [27] :: Lint checks and some UI changes.
 [28] :: App resume testing for Video black screen. Also testing letting app not take audio focus if adapter audio transfer is off.
 [29] :: Ktlint and Detekt fixes. Refactored File Export
+[30] :: Video Code change TESTING. Seems unstable or long to recover, too aggressive and compounding recovery logic.

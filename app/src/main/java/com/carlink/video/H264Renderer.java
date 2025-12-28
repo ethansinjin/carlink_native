@@ -142,6 +142,11 @@ public class H264Renderer {
     private long codecResetCount = 0;
     private long totalBytesProcessed = 0;
 
+    // Recovery metrics - tracks video recovery performance for optimization analysis
+    private long totalRecoveryTimeMs = 0;
+    private int recoveryCount = 0;
+    private long lastRecoveryTimeMs = 0; // Most recent recovery time for logging
+
     // Adaptive FPS detection - tracks actual stream frame rate
     // Common rates: 30fps (some adapters), 60fps (CarPlay default), 25fps (PAL regions)
     private int detectedTargetFps = 60; // Initial assumption, updated based on actual rate
@@ -152,10 +157,12 @@ public class H264Renderer {
     private long lastPerfLogTime = 0;
 
     // Codec reset rate limiting - prevents rapid reset loops during startup
-    private static final long MIN_RESET_INTERVAL_MS = 500; // Minimum 500ms between resets
-    private static final int MAX_RAPID_RESETS = 3; // Max resets within window before cooldown
-    private static final long RESET_WINDOW_MS = 5000; // 5 second window for tracking rapid resets
-    private static final long RESET_COOLDOWN_MS = 2000; // 2 second cooldown after rapid resets
+    // OPTIMIZED: Reduced intervals for faster recovery while still preventing thrashing
+    // Research: Allows quicker legitimate recovery while catching actual reset loops
+    private static final long MIN_RESET_INTERVAL_MS = 200; // Minimum 200ms between resets (was 500)
+    private static final int MAX_RAPID_RESETS = 5; // Max resets within window before cooldown (was 3)
+    private static final long RESET_WINDOW_MS = 10000; // 10 second window for tracking rapid resets (was 5000)
+    private static final long RESET_COOLDOWN_MS = 1000; // 1 second cooldown after rapid resets (was 2000)
     private long lastResetTime = 0;
     private int resetsInWindow = 0;
     private long windowStartTime = 0;
@@ -163,14 +170,19 @@ public class H264Renderer {
 
     // Startup stabilization - don't reset during initial codec warmup
     // Prevents rapid resets during Surface sizing that corrupt callback state
-    private static final long MIN_STARTUP_TIME_MS = 2000; // 2 seconds for codec to stabilize
+    // OPTIMIZED: Reduced from 2000ms to 500ms for faster recovery
+    // Research: MediaCodec callback thread typically stabilizes within 100-200ms
+    private static final long MIN_STARTUP_TIME_MS = 500; // 500ms for codec to stabilize (was 2000)
     private long codecStartTime = 0;
 
     // Post-reset keyframe detection - request keyframe if receiving frames but not decoding
     // This handles the case where keyframe request fails during adapter reconnection
-    private static final int KEYFRAME_REQUEST_THRESHOLD = 15; // Request after 15 frames with no output (reduced from 30)
-    private static final long KEYFRAME_REQUEST_TIME_THRESHOLD_MS = 5000; // OR after 5 seconds with no output
-    private static final long KEYFRAME_REQUEST_COOLDOWN_MS = 2000; // Don't spam requests
+    // OPTIMIZED: Reduced thresholds for faster video recovery (was 15/5000/2000)
+    // Research: pi-carplay-main achieves near-instant recovery with simpler approach
+    // See: https://developer.android.com/reference/android/media/MediaCodec (CSD resubmission)
+    private static final int KEYFRAME_REQUEST_THRESHOLD = 5; // Request after 5 frames with no output (~83ms at 60fps)
+    private static final long KEYFRAME_REQUEST_TIME_THRESHOLD_MS = 1000; // OR after 1 second with no output
+    private static final long KEYFRAME_REQUEST_COOLDOWN_MS = 500; // 500ms between requests (was 2000)
     private long framesReceivedSinceReset = 0;
     private long framesDecodedSinceReset = 0;
     private long lastKeyframeRequestTime = 0;
@@ -1236,8 +1248,16 @@ public class H264Renderer {
                         }
 
                         // Disable keyframe detection once we're successfully decoding
+                        // Also log recovery metrics when video recovers after reset
                         if (pendingKeyframeRequest && framesDecodedSinceReset >= 3) {
-                            log("[KEYFRAME_DETECT] Decoder producing output - disabling keyframe detection");
+                            // Calculate and log recovery time
+                            long recoveryTime = System.currentTimeMillis() - resetTimestamp;
+                            totalRecoveryTimeMs += recoveryTime;
+                            recoveryCount++;
+                            lastRecoveryTimeMs = recoveryTime;
+                            long avgRecoveryTime = totalRecoveryTimeMs / recoveryCount;
+                            log("[RECOVERY] Video recovered in " + recoveryTime + "ms " +
+                                "(avg: " + avgRecoveryTime + "ms, count: " + recoveryCount + ")");
                             pendingKeyframeRequest = false;
                         }
 

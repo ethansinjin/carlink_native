@@ -1344,6 +1344,12 @@ class CarlinkManager(
 
         frameIntervalJob =
             scope.launch(Dispatchers.IO) {
+                // OPTIMIZATION: Send immediate keyframe request on start for faster video recovery
+                // Research: pi-carplay-main achieves near-instant recovery by not delaying first request
+                // This ensures keyframe is requested immediately after reset/resume, not after 5s delay
+                val immediateSent = adapterDriver?.sendCommand(CommandMapping.FRAME) ?: false
+                logInfo("[FRAME_INTERVAL] Immediate keyframe request sent=$immediateSent", tag = Logger.Tags.VIDEO)
+
                 var requestCount = 0
                 while (isActive) {
                     delay(5000)
