@@ -148,6 +148,8 @@ enum class FileAddress(
 ) {
     DPI("/tmp/screen_dpi"),
     NIGHT_MODE("/tmp/night_mode"),
+    HAND_DRIVE_MODE("/tmp/hand_drive_mode"),
+    CHARGE_MODE("/tmp/charge_mode"),
     BOX_NAME("/etc/box_name"),
     AIRPLAY_CONFIG("/etc/airplay.conf"),
     ANDROID_WORK_MODE("/etc/android_work_mode"),

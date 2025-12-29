@@ -262,6 +262,8 @@ object MessageSerializer {
                 put("btName", "carlink")
                 put("boxName", "carlink")
                 put("OemName", "carlink")
+                put("autoConn", true) // Auto-connect when device detected
+                put("autoPlay", false) // Don't auto-play media on connection
             }
 
         val payload = json.toString().toByteArray(StandardCharsets.US_ASCII)
@@ -402,11 +404,17 @@ oemIconLabel = ${config.boxName}
         messages: MutableList<ByteArray>,
         config: AdapterConfig,
     ) {
+        // Hand drive mode: 0 = Left Hand Drive (LHD), 1 = Right Hand Drive (RHD)
+        messages.add(serializeNumber(0, FileAddress.HAND_DRIVE_MODE))
+
         // Box name
         messages.add(serializeString(config.boxName, FileAddress.BOX_NAME))
 
         // AirPlay configuration
         messages.add(serializeString(generateAirplayConfig(config), FileAddress.AIRPLAY_CONFIG))
+
+        // Charge mode: 0 = off (no quick charge), 1 = quick charge enabled
+        messages.add(serializeNumber(0, FileAddress.CHARGE_MODE))
 
         // Upload icons if provided
         config.icon120Data?.let { messages.add(serializeFile(FileAddress.ICON_120.path, it)) }
