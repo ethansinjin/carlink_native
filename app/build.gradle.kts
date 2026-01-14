@@ -12,7 +12,7 @@ android {
         applicationId = "zeno.carlink"
         minSdk = 32
         targetSdk = 36
-        versionCode = 43
+        versionCode = 47
         versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -74,6 +74,9 @@ dependencies {
 
     // DataStore for preferences persistence
     implementation("androidx.datastore:datastore-preferences:1.2.0")
+
+    // DocumentFile for SAF file operations (capture recording)
+    implementation("androidx.documentfile:documentfile:1.1.0")
 
     // Compose BOM
     implementation(platform("androidx.compose:compose-bom:2025.12.01"))

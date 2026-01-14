@@ -334,7 +334,7 @@ data class AdapterConfig(
     /** Call quality: 0=normal, 1=clear, 2=HD. Sent in BoxSettings. */
     val callQuality: Int = 2,
     val oemIconVisible: Boolean = true,
-    val androidWorkMode: Boolean = false,
+    val androidWorkMode: Boolean = true,
     val icon120Data: ByteArray? = null,
     val icon180Data: ByteArray? = null,
     val icon256Data: ByteArray? = null,

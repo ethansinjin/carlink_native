@@ -10,7 +10,7 @@ Complete protocol translation table for CPC200-CCPA firmware based on reverse en
 - **Live USB Captures**: `~/.pi-carplay/usb-logs/` (Dec 2025)
 - **CPC200 Research**: `/Users/zeno/Downloads/GM_research/cpc200_research/`
 
-**Last Updated:** 2026-01-11 (with January 2026 raw USB capture verification)
+**Last Updated:** 2026-01-13 (with January 2026 carlink_native vs pi-carplay capture comparison)
 
 ---
 
@@ -48,14 +48,41 @@ session_management:
     purpose: "Initialize CPC200-CCPA session with display parameters"
     firmware_support: true
     translation_target: "DMSDP Session Init"
+    confirmed_in_capture: true  # Jan 2026 capture analysis
     payload_structure:
       width: uint32           # Display width (default: 800)
-      height: uint32          # Display height (default: 480)  
+      height: uint32          # Display height (default: 480)
       fps: uint32            # Frame rate (default: 30)
-      format: uint32         # Video format ID (default: 5)
+      format: uint32         # Video format ID - AFFECTS ADAPTER BEHAVIOR
       pkt_max: uint32        # Max packet size (default: 49152)
       version: uint32        # Protocol version (default: 255)
       mode: uint32           # Operation mode (default: 2)
+    format_field_values:
+      - value: 1
+        name: "Basic Mode"
+        behavior: "Minimal IDR insertion, adapter may not respond to Frame sync"
+        observed_in: "pi-carplay capture"
+      - value: 5
+        name: "Full H.264 Mode"
+        behavior: "Responsive to Frame sync, more aggressive IDR insertion"
+        observed_in: "carlink_native capture"
+    capture_verification:
+      source: "Jan 2026 capture comparison"
+      evidence:
+        - client: "carlink_native"
+          format_value: 5
+          idr_frames_received: 107
+          sps_repetitions: 118
+          receives_0x3F1: true
+        - client: "pi-carplay"
+          format_value: 1
+          idr_frames_received: 27
+          sps_repetitions: 33
+          receives_0x3F1: false
+      conclusion: |
+        The format field in the OPEN command significantly affects adapter behavior.
+        format=5 enables full keyframe recovery support with Frame sync responsiveness.
+        format=1 results in minimal IDR insertion (primarily at stream start only).
 
   - command: 0x0F
     name: "DiscPhone"
@@ -216,12 +243,35 @@ extended_commands_h2d:
   - command: 0x0C
     name: "Frame"
     payload_size: 0
-    purpose: "Frame synchronization command (sent TO adapter)"
+    purpose: "Frame synchronization / IDR request command (sent TO adapter)"
     firmware_support: true
     translation_target: "Video Frame Sync"
     confirmed_in_logs: true
+    confirmed_in_capture: true  # Jan 2026 carlink_native capture
     direction: "Host → Device"
-    frequency: "Every 5 seconds during session"
+    frequency: "On-demand for keyframe recovery"
+    idr_trigger: true  # VERIFIED: Adapter responds with SPS+PPS+IDR
+    capture_verification:
+      source: "carlink_capture-2026-01-13T15-37-17-527Z"
+      evidence:
+        - frame_sync_sent: "41,297ms"
+          idr_received: "41,395ms"
+          delta: "98ms"
+        - frame_sync_sent: "440,859ms"
+          idr_received: "441,040ms"
+          delta: "181ms"
+      conclusion: "Adapter responds to Frame sync with complete keyframe (SPS+PPS+IDR) within 100-200ms"
+    notes: |
+      CRITICAL FINDING (Jan 2026): The Frame command (0x0C) triggers the adapter to send
+      a fresh IDR frame with SPS/PPS. This is the primary mechanism for keyframe recovery.
+
+      Comparison with pi-carplay:
+      - carlink_native sends Frame sync: YES (2 observed in capture)
+      - pi-carplay sends Frame sync: NO (0 observed in capture)
+      - carlink_native IDR frames received: ~107
+      - pi-carplay IDR frames received: ~27
+
+      This explains the difference in IDR frequency between the two implementations.
 
   - command: 0x16
     name: "AudioTransfer"
@@ -396,13 +446,168 @@ extended_commands_d2h:
       metadata_type: uint32      # Metadata type identifier (0x01)
       json_data: string[28]      # JSON: {"MediaSongPlayTime":XXXXX}
 
+  - command: 0x3F1
+    name: "IdrSent"
+    payload_size: 0
+    purpose: "IDR frame sent notification (received FROM adapter)"
+    firmware_support: true
+    translation_target: "Video Sync"
+    confirmed_in_capture: true  # Jan 2026 carlink_native capture
+    direction: "Device → Host"
+    frequency: "After Frame sync request or adaptive IDR insertion"
+    capture_verification:
+      source: "carlink_capture-2026-01-13T15-37-17-527Z"
+      observation: "Adapter sends 0x3F1 to carlink_native but NOT to pi-carplay"
+      evidence:
+        - carlink_native_receives: true
+          pi_carplay_receives: false
+      timing: "Appears after IDR frame delivery"
+    notes: |
+      DISCOVERY (Jan 2026): Command 0x3F1 was previously documented as "requestIDR"
+      sent Host → Device. Capture analysis reveals it is actually sent Device → Host
+      as an IDR sent notification or acknowledgment.
+
+      The adapter sends 0x3F1 to carlink_native (which sends Frame sync commands)
+      but does NOT send it to pi-carplay (which doesn't send Frame sync).
+
+      This may serve as:
+      1. Confirmation that IDR was delivered
+      2. Sync signal for video pipeline reset
+      3. Indication of adaptive IDR insertion by adapter
+
+  # Additional commands discovered in Jan 2026 capture analysis
+  - command: 0x0001
+    name: "Disconnect"
+    payload_size: 0
+    purpose: "Session disconnect notification (received FROM adapter)"
+    firmware_support: true
+    translation_target: "Session Management"
+    confirmed_in_capture: true
+    direction: "Device → Host"
+    capture_example:
+      source: "carlink_capture-2026-01-13"
+      observed_at: "813787ms"
+      note: "Sent when phone disconnects from CarPlay"
+
+  - command: 0x0002
+    name: "Reconnect"
+    payload_size: 0
+    purpose: "Session reconnect notification (received FROM adapter)"
+    firmware_support: true
+    translation_target: "Session Management"
+    confirmed_in_capture: true
+    direction: "Device → Host"
+    capture_example:
+      source: "carlink_capture-2026-01-13"
+      observed_at: "820726ms"
+
+  - command: 0x0003
+    name: "AudioState"
+    payload_size: 0
+    purpose: "Audio state change notification (received FROM adapter)"
+    firmware_support: true
+    translation_target: "Audio Management"
+    confirmed_in_capture: true
+    direction: "Device → Host"
+    frequency: "Periodic during active audio streaming"
+    capture_example:
+      source: "carlink_capture-2026-01-13"
+      occurrences: 5
+      timing: "69538ms, 105414ms, 292652ms, 439618ms, 1541614ms"
+      note: "Appears to signal audio stream state changes"
+
+  - command: 0x0004
+    name: "PhoneStatus"
+    payload_size: 24
+    purpose: "Phone status with Bluetooth MAC address (received FROM adapter)"
+    firmware_support: true
+    translation_target: "Device Info"
+    confirmed_in_capture: true
+    direction: "Device → Host"
+    payload_structure:
+      command_id: uint32     # 0x0004
+      bt_mac_address: string[17]  # Format: XX:XX:XX:XX:XX:XX
+      flags: uint16          # Status flags (0x07B6 observed)
+    capture_example:
+      source: "carlink_capture-2026-01-13"
+      hex: "04 00 00 00 36 34 3a 33 31 3a 33 35 3a 38 43 3a 32 39 3a 36 39 b6 07 00"
+      decoded:
+        bt_mac: "64:31:35:8C:29:69"
+        flags: "0x07B6"
+
+  - command: 0x03EC
+    name: "DeviceFound"
+    payload_size: 0
+    purpose: "Device found notification during scanning (received FROM adapter)"
+    firmware_support: true
+    translation_target: "WiFi Management"
+    confirmed_in_capture: true
+    direction: "Device → Host"
+    capture_example:
+      source: "carlink_capture-2026-01-13"
+      observed_at: "37018ms"
+      value: "1004"
+
+  - command: 0x03EF
+    name: "DeviceConnected"
+    payload_size: 0
+    purpose: "Device successfully connected (received FROM adapter)"
+    firmware_support: true
+    translation_target: "WiFi Management"
+    confirmed_in_capture: true
+    direction: "Device → Host"
+    capture_example:
+      source: "carlink_capture-2026-01-13"
+      observed_at: "36943ms"
+      value: "1007"
+
+  - command: 0x03F0
+    name: "StreamReady"
+    payload_size: 0
+    purpose: "Streaming ready notification (received FROM adapter)"
+    firmware_support: true
+    translation_target: "Session Management"
+    confirmed_in_capture: true
+    direction: "Device → Host"
+    capture_example:
+      source: "carlink_capture-2026-01-13"
+      observed_at: "42478ms"
+      value: "1008"
+      note: "Sent after connection established, before video streaming begins"
+
+  - command: 0x03F2
+    name: "ConnectionComplete"
+    payload_size: 0
+    purpose: "Connection fully established (received FROM adapter)"
+    firmware_support: true
+    translation_target: "Session Management"
+    confirmed_in_capture: true
+    direction: "Device → Host"
+    capture_example:
+      source: "carlink_capture-2026-01-13"
+      observed_at: "37641ms"
+      value: "1010"
+
 unsupported_commands:
   - command: 0x99
     name: "SendFile"
     payload_size: variable
     purpose: "File transfer to adapter storage"
-    firmware_support: false
-    reason: "Not found in firmware analysis"
+    firmware_support: true  # CORRECTED: Actually used for screen_dpi and android_work_mode
+    confirmed_in_capture: true
+    direction: "Host → Device"
+    payload_structure:
+      path_length: uint32
+      file_path: string
+      data_length: uint32
+      file_data: bytes
+    capture_examples:
+      - path: "/tmp/screen_dpi"
+        data: "0xC8 (200)"
+        purpose: "Set screen DPI"
+      - path: "/etc/android_work_mode"
+        data: "0x01"
+        purpose: "Enable Android Auto mode"
 
   - command: 0x56
     name: "APScreenOpVideoConfig"

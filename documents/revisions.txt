@@ -58,3 +58,7 @@
 [41] :: More Video code changes from USB capture of video data.
 [42] :: Audio Code changes based on USB capture of audio data, like 41.
 [43] :: Playback feature added. Uses modified Pi-carplay captured USB binaries, injects into app audio and video pipeline. Mimics live CarPlay session for video and audio troubleshooting.
+[44] :: Set androidWorkMode to true for Android Auto pairing testing.
+[45] :: SPS/PPS Cache fix
+[46] :: Static Analysis Tool code correction. Video Code changes according to Google H264 guidelines. Test session record
+[47] :: Session Record Function Testing and some Settings UI reorganization.

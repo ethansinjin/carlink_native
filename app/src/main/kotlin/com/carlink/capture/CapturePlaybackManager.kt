@@ -200,11 +200,14 @@ class CapturePlaybackManager(
 
     /**
      * Stop playback.
+     *
+     * Sets state to IDLE (not READY) to prevent auto-restart from
+     * MainScreen's LaunchedEffect that watches for READY state.
      */
     fun stopPlayback() {
         logInfo("[$TAG] Stopping playback", tag = TAG)
         replaySource?.stop()
-        setState(State.READY)
+        setState(State.IDLE)
     }
 
     /**
@@ -275,25 +278,58 @@ class CapturePlaybackManager(
     // Track video packet count for logging
     private var videoPacketCount = 0
 
+    // Protocol magic bytes (0x55AA55AA stored as little-endian bytes: 0xAA, 0x55, 0xAA, 0x55)
+    private val PROTOCOL_MAGIC = byteArrayOf(0xAA.toByte(), 0x55.toByte(), 0xAA.toByte(), 0x55.toByte())
+
+    /**
+     * Detect capture format based on magic byte position.
+     * Returns the offset where protocol header starts.
+     *
+     * Both carlink_native and pi-carplay now use the same format: magic at offset 0.
+     * The offset-12 check is kept for backwards compatibility with older captures.
+     */
+    private fun detectCapturePrefix(data: ByteArray): Int {
+        if (data.size < 16) return 0
+
+        // Check if magic is at offset 0 (standard format - both carlink_native and pi-carplay)
+        if (data[0] == PROTOCOL_MAGIC[0] && data[1] == PROTOCOL_MAGIC[1] &&
+            data[2] == PROTOCOL_MAGIC[2] && data[3] == PROTOCOL_MAGIC[3]
+        ) {
+            return 0
+        }
+
+        // Check if magic is at offset 12 (legacy format - kept for backwards compatibility)
+        if (data.size >= 28 &&
+            data[12] == PROTOCOL_MAGIC[0] && data[13] == PROTOCOL_MAGIC[1] &&
+            data[14] == PROTOCOL_MAGIC[2] && data[15] == PROTOCOL_MAGIC[3]
+        ) {
+            return 12
+        }
+
+        // Default: assume standard format (no prefix)
+        return 0
+    }
+
     /**
      * Process video packet.
      *
-     * Video packets in the capture file have the structure:
-     * - 12-byte capture prefix (packet length, flags, type repeated)
-     * - 16-byte protocol header (magic + type + length + ...)
-     * - 20-byte video header (width, height, flags, etc.)
-     * - H.264 NAL data (Annex B format with start codes)
+     * Supports two capture formats:
+     * 1. pi-carplay: 12-byte capture prefix + 16-byte protocol header + 20-byte video header + H.264
+     * 2. carlink_native: 16-byte protocol header + 20-byte video header + H.264
      *
-     * Total header to skip: 12 + 16 + 20 = 48 bytes
+     * Format is auto-detected based on magic byte position.
      */
     private fun processVideoPacket(data: ByteArray) {
         val manager = carlinkManager ?: return
 
-        // Capture prefix (12) + Protocol header (16) + Video header (20)
-        // Total header: 48 bytes
-        val headerSize = 12 + 16 + 20
+        // Detect format and calculate header size
+        val capturePrefix = detectCapturePrefix(data)
+        val protocolHeaderSize = 16
+        val videoHeaderSize = 20
+        val headerSize = capturePrefix + protocolHeaderSize + videoHeaderSize
+
         if (data.size <= headerSize) {
-            logDebug("[$TAG] Video packet too small: ${data.size}", tag = TAG)
+            logDebug("[$TAG] Video packet too small: ${data.size} (expected > $headerSize)", tag = TAG)
             return
         }
 
@@ -304,7 +340,7 @@ class CapturePlaybackManager(
         // Log first few packets with detailed hex dump
         if (videoPacketCount <= 5 || videoPacketCount % 100 == 0) {
             val hexDump = h264Data.take(16).joinToString(" ") { String.format("%02X", it) }
-            val nalType = if (h264Data.isNotEmpty()) h264Data[0].toInt() and 0x1F else -1
+            val nalType = findNalType(h264Data)
             logInfo("[$TAG] Video packet #$videoPacketCount: ${h264Data.size} bytes, first 16: $hexDump, NAL type=$nalType", tag = TAG)
         }
 
@@ -318,27 +354,24 @@ class CapturePlaybackManager(
     /**
      * Process audio packet.
      *
-     * Audio packets in the capture file have the structure:
-     * - 12-byte capture prefix (packet length, flags, type repeated)
-     * - 16-byte protocol header
-     * - 12-byte audio header (decode_type, volume, audio_type)
-     * - PCM audio data
+     * Supports two capture formats:
+     * 1. pi-carplay: 12-byte capture prefix + 16-byte protocol header + 12-byte audio header + PCM
+     * 2. carlink_native: 16-byte protocol header + 12-byte audio header + PCM
      *
-     * Total header to skip for audio data: 12 + 16 + 12 = 40 bytes
-     * Audio header starts at offset 28 (12 + 16)
+     * Format is auto-detected based on magic byte position.
      */
     private fun processAudioPacket(data: ByteArray) {
         val manager = carlinkManager ?: return
 
-        // Capture prefix (12) + Protocol header (16) + Audio header (12)
-        val capturePrefixSize = 12
+        // Detect format
+        val capturePrefixSize = detectCapturePrefix(data)
         val protocolHeaderSize = 16
         val audioHeaderSize = 12
         val audioHeaderOffset = capturePrefixSize + protocolHeaderSize
         val totalHeaderSize = capturePrefixSize + protocolHeaderSize + audioHeaderSize
 
         if (data.size <= totalHeaderSize) {
-            logDebug("[$TAG] Audio packet too small: ${data.size}", tag = TAG)
+            logDebug("[$TAG] Audio packet too small: ${data.size} (expected > $totalHeaderSize)", tag = TAG)
             return
         }
 
@@ -377,5 +410,35 @@ class CapturePlaybackManager(
 
         // Inject into CarlinkManager's audio manager
         manager.injectAudioData(audioData, audioType, decodeType)
+    }
+
+    /**
+     * Find NAL unit type from H.264 Annex B data.
+     * Searches for start code (00 00 01 or 00 00 00 01) and returns NAL type from header byte.
+     *
+     * @return NAL type (1-31) or -1 if not found
+     */
+    private fun findNalType(data: ByteArray): Int {
+        if (data.size < 4) return -1
+
+        // Search first 16 bytes for start code
+        val searchLimit = minOf(data.size - 1, 16)
+        for (i in 0 until searchLimit) {
+            if (data[i] == 0x00.toByte() && data[i + 1] == 0x00.toByte()) {
+                // Check for 3-byte start code: 00 00 01
+                if (i + 2 < data.size && data[i + 2] == 0x01.toByte()) {
+                    if (i + 3 < data.size) {
+                        return data[i + 3].toInt() and 0x1F
+                    }
+                }
+                // Check for 4-byte start code: 00 00 00 01
+                if (i + 3 < data.size && data[i + 2] == 0x00.toByte() && data[i + 3] == 0x01.toByte()) {
+                    if (i + 4 < data.size) {
+                        return data[i + 4].toInt() and 0x1F
+                    }
+                }
+            }
+        }
+        return -1
     }
 }

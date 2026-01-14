@@ -44,8 +44,13 @@ class UsbDeviceWrapper(
     private val _isOpened = AtomicBoolean(false)
     private val _isReadingLoopActive = AtomicBoolean(false)
 
+    // Recording callback for capturing all USB traffic (set before adapter init)
+    @Volatile
+    private var recordingCallback: RecordingCallback? = null
+
     val isOpened: Boolean get() = _isOpened.get()
     val isReadingLoopActive: Boolean get() = _isReadingLoopActive.get()
+    val isRecording: Boolean get() = recordingCallback != null
 
     val vendorId: Int get() = device.vendorId
     val productId: Int get() = device.productId
@@ -58,6 +63,17 @@ class UsbDeviceWrapper(
     private var receiveCount: Int = 0
     private var sendErrors: Int = 0
     private var receiveErrors: Int = 0
+
+    /**
+     * Set the recording callback for capturing USB traffic.
+     * Call this BEFORE adapter initialization to capture all communication.
+     *
+     * @param callback The recording callback, or null to disable recording
+     */
+    fun setRecordingCallback(callback: RecordingCallback?) {
+        this.recordingCallback = callback
+        log("Recording ${if (callback != null) "enabled" else "disabled"}")
+    }
 
     /**
      * Check if we have permission to access the USB device.
@@ -266,6 +282,23 @@ class UsbDeviceWrapper(
             if (result >= 0) {
                 bytesSent += result
                 sendCount++
+
+                // Record outgoing packet if recording is active
+                recordingCallback?.let { recorder ->
+                    try {
+                        // Record complete packet (like pi-carplay)
+                        if (data.size >= 16) {
+                            // Parse type from header (bytes 8-11, little-endian)
+                            val type = (data[8].toInt() and 0xFF) or
+                                ((data[9].toInt() and 0xFF) shl 8) or
+                                ((data[10].toInt() and 0xFF) shl 16) or
+                                ((data[11].toInt() and 0xFF) shl 24)
+                            recorder.onPacket("OUT", type, data.copyOf())
+                        }
+                    } catch (e: Exception) {
+                        // Don't let recording errors affect write operation
+                    }
+                }
             } else {
                 sendErrors++
             }
@@ -347,16 +380,41 @@ class UsbDeviceWrapper(
     }
 
     /**
+     * Callback interface for recording raw USB packets.
+     * Called for EVERY packet (including video) with full raw data.
+     *
+     * Data is captured at the USB boundary BEFORE any processing (ring buffer, parsing, etc.)
+     * This matches pi-carplay's capture approach for reliable, uncorrupted recordings.
+     */
+    interface RecordingCallback {
+        /**
+         * Record a complete packet (header + payload as single buffer).
+         * Called immediately after USB read, before any processing.
+         *
+         * @param direction "IN" for adapter->app, "OUT" for app->adapter
+         * @param type Message type ID
+         * @param data Complete packet data (16-byte header + payload)
+         */
+        fun onPacket(
+            direction: String,
+            type: Int,
+            data: ByteArray,
+        )
+    }
+
+    /**
      * Start the continuous reading loop.
      *
      * @param callback Callback for received messages
      * @param timeout Read timeout in milliseconds
      * @param videoProcessor Optional processor for direct video data handling (bypasses message parsing)
+     * @param recordingCallback Optional callback for recording raw packets (deprecated, use setRecordingCallback)
      */
     fun startReadingLoop(
         callback: ReadingLoopCallback,
         timeout: Int = 30000,
         videoProcessor: VideoDataProcessor? = null,
+        @Suppress("UNUSED_PARAMETER") recordingCallback: RecordingCallback? = null,
     ) {
         if (_isReadingLoopActive.getAndSet(true)) {
             log("Reading loop already active")
@@ -364,8 +422,14 @@ class UsbDeviceWrapper(
         }
 
         Thread {
-            log("Reading loop started")
+            // Use class member recording callback
+            val activeRecordingCallback = this.recordingCallback
+            log("Reading loop started" + if (activeRecordingCallback != null) " (recording enabled)" else "")
             val headerBuffer = ByteArray(16)
+
+            // Pre-allocate raw capture buffer for video packets (reused to avoid allocation per frame)
+            // This buffer captures raw USB data BEFORE any processing - matching pi-carplay approach
+            var rawCaptureBuffer: ByteArray? = if (activeRecordingCallback != null) ByteArray(512 * 1024) else null
 
             try {
                 while (_isReadingLoopActive.get() && _isOpened.get()) {
@@ -392,32 +456,37 @@ class UsbDeviceWrapper(
                             continue
                         }
 
-                    // Handle VIDEO_DATA specially with direct processing for zero-copy performance
-                    // This bypasses message parsing and writes directly to the renderer's ring buffer
+                    // Handle VIDEO_DATA with zero-copy processing
+                    // Key change: When recording, we read into raw buffer FIRST, record it,
+                    // THEN copy to ring buffer. This eliminates race conditions.
                     if (header.type == com.carlink.protocol.MessageType.VIDEO_DATA &&
                         header.length > 0 && videoProcessor != null
                     ) {
-                        // Direct video processing - read USB data directly into ring buffer
-                        // CRITICAL: Wrap in try-catch to prevent exceptions from crashing reading loop
-                        // which would trigger disconnect and session close
                         val conn = connection
                         val endpoint = inEndpoint
                         if (conn != null && endpoint != null) {
                             try {
-                                videoProcessor.processVideoDirect(header.length) { buffer, offset, length ->
-                                    // Read chunks directly into the provided buffer
+                                if (activeRecordingCallback != null) {
+                                    // RECORDING MODE: Read into raw buffer first, then process
+                                    // This matches pi-carplay's capture-before-process approach
+
+                                    // Ensure raw capture buffer is large enough
+                                    if (rawCaptureBuffer == null || rawCaptureBuffer!!.size < header.length) {
+                                        rawCaptureBuffer = ByteArray(maxOf(header.length, 512 * 1024))
+                                    }
+
+                                    // Step 1: Read raw USB data into capture buffer
                                     var totalRead = 0
-                                    while (totalRead < length && _isReadingLoopActive.get()) {
-                                        val remaining = length - totalRead
+                                    while (totalRead < header.length && _isReadingLoopActive.get()) {
+                                        val remaining = header.length - totalRead
                                         val chunkSize = minOf(remaining, 16384)
-                                        val chunkRead =
-                                            conn.bulkTransfer(
-                                                endpoint,
-                                                buffer,
-                                                offset + totalRead,
-                                                chunkSize,
-                                                timeout,
-                                            )
+                                        val chunkRead = conn.bulkTransfer(
+                                            endpoint,
+                                            rawCaptureBuffer,
+                                            totalRead,
+                                            chunkSize,
+                                            timeout,
+                                        )
                                         if (chunkRead > 0) {
                                             totalRead += chunkRead
                                             bytesReceived += chunkRead
@@ -426,13 +495,57 @@ class UsbDeviceWrapper(
                                             break
                                         }
                                     }
-                                    totalRead
+
+                                    // Step 2: Record the raw packet IMMEDIATELY (before any processing)
+                                    if (totalRead > 0) {
+                                        try {
+                                            // Combine header + payload into single buffer (like pi-carplay)
+                                            val completePacket = ByteArray(16 + totalRead)
+                                            System.arraycopy(headerBuffer, 0, completePacket, 0, 16)
+                                            System.arraycopy(rawCaptureBuffer!!, 0, completePacket, 16, totalRead)
+                                            activeRecordingCallback.onPacket("IN", header.type.id, completePacket)
+                                        } catch (e: Exception) {
+                                            log("Recording callback error (video): ${e.message}")
+                                        }
+                                    }
+
+                                    // Step 3: Now process for video rendering (copy to ring buffer)
+                                    if (totalRead == header.length) {
+                                        videoProcessor.processVideoDirect(header.length) { buffer, offset, _ ->
+                                            // Copy from raw capture buffer to ring buffer
+                                            System.arraycopy(rawCaptureBuffer!!, 0, buffer, offset, totalRead)
+                                            totalRead
+                                        }
+                                    }
+                                } else {
+                                    // NO RECORDING: Use zero-copy direct read into ring buffer
+                                    videoProcessor.processVideoDirect(header.length) { buffer, offset, length ->
+                                        var totalRead = 0
+                                        while (totalRead < length && _isReadingLoopActive.get()) {
+                                            val remaining = length - totalRead
+                                            val chunkSize = minOf(remaining, 16384)
+                                            val chunkRead = conn.bulkTransfer(
+                                                endpoint,
+                                                buffer,
+                                                offset + totalRead,
+                                                chunkSize,
+                                                timeout,
+                                            )
+                                            if (chunkRead > 0) {
+                                                totalRead += chunkRead
+                                                bytesReceived += chunkRead
+                                                receiveCount++
+                                            } else if (chunkRead <= 0) {
+                                                break
+                                            }
+                                        }
+                                        totalRead
+                                    }
                                 }
 
-                                // Notify callback that video data was received (empty payload signals streaming)
+                                // Notify callback that video data was received
                                 callback.onMessage(header.type.id, ByteArray(0))
                             } catch (e: Exception) {
-                                // Log but don't propagate - prevents reading loop crash on video processing errors
                                 log("Video processing error (non-fatal): ${e.message}")
                                 receiveErrors++
                             }
@@ -440,7 +553,7 @@ class UsbDeviceWrapper(
                         continue
                     }
 
-                    // Read payload for non-video messages (or video if no processor)
+                    // Read payload for non-video messages
                     val payload =
                         if (header.length > 0) {
                             val payloadBuffer = ByteArray(header.length)
@@ -462,7 +575,20 @@ class UsbDeviceWrapper(
                             null
                         }
 
-                    // Deliver message
+                    // Record packet IMMEDIATELY after reading (before any processing)
+                    if (activeRecordingCallback != null && payload != null) {
+                        try {
+                            // Combine header + payload into single buffer (like pi-carplay)
+                            val completePacket = ByteArray(16 + payload.size)
+                            System.arraycopy(headerBuffer, 0, completePacket, 0, 16)
+                            System.arraycopy(payload, 0, completePacket, 16, payload.size)
+                            activeRecordingCallback.onPacket("IN", header.type.id, completePacket)
+                        } catch (e: Exception) {
+                            log("Recording callback error: ${e.message}")
+                        }
+                    }
+
+                    // Deliver message to callback
                     try {
                         callback.onMessage(header.type.id, payload)
                     } catch (e: Exception) {

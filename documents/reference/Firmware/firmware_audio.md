@@ -1389,3 +1389,84 @@ CPC200-CCPA firmware implements a **lightweight audio gateway** optimized for se
 - Reliable abstraction for codec configurations
 
 This enables effective **automotive audio bridging** while delegating sophisticated processing (WebRTC, noise cancellation, optimizations) to downstream systems.
+
+---
+
+## January 2026 Capture Analysis (carlink_native)
+
+**Source:** `carlink_capture-2026-01-13T15-37-17-527Z.bin/.json`
+**Session Duration:** 1545 seconds (~25 minutes)
+
+### Audio Statistics from Capture
+
+| Direction | Total Packets | Breakdown |
+|-----------|---------------|-----------|
+| **IN (Adapter → Host)** | 26,075 | Media, Nav, Voice |
+| **OUT (Host → Adapter)** | 346 | Microphone (Siri activation) |
+
+### Audio Type Distribution (Incoming)
+
+| Audio Type | Count | Percentage | Description |
+|------------|-------|------------|-------------|
+| 1 (Media) | 25,214 | 96.7% | Music playback |
+| 2 (Navigation) | 859 | 3.3% | Turn-by-turn prompts |
+| 3 (Voice/Siri) | 2 | <0.1% | Siri responses |
+
+### Decode Type Distribution
+
+| Decode Type | Count | Description |
+|-------------|-------|-------------|
+| 4 (PCM_48K) | 25,841 | 48kHz PCM (main audio) |
+| 5 (AAC) | 233 | AAC-encoded audio |
+| 2 (PCM_16K) | 1 | 16kHz PCM (voice) |
+
+### Navigation Audio Bursts
+
+Navigation audio arrives in bursts corresponding to turn-by-turn prompts:
+
+| Burst | Timestamp | Packets | Approx Duration |
+|-------|-----------|---------|-----------------|
+| 1 | 984,883ms | 136 | ~8.2s |
+| 2 | 1,029,867ms | 66 | ~4.0s |
+| 3 | 1,083,871ms | 125 | ~7.5s |
+| 4 | 1,115,878ms | 67 | ~4.0s |
+| 5 | 1,143,875ms | 106 | ~6.4s |
+| ... | ... | ... | ... |
+| **Total** | - | **859** | **9 bursts** |
+
+### Microphone Data (Outgoing)
+
+When Siri is activated (around 813,700ms):
+
+| Field | Value |
+|-------|-------|
+| **Decode Type** | 5 (AAC-encoded) |
+| **Payload Size** | 640 bytes (fixed) |
+| **Total Packets** | 346 |
+| **Audio Type** | 3 (Voice) |
+
+### Volume Field Observations
+
+| Volume Value | Count | Notes |
+|--------------|-------|-------|
+| 0 | 26,057 | Normal (no ducking) |
+| 1045220558 | 9 | Float 0.5 as int (ducking) |
+| 1065353216 | 9 | Float 1.0 as int (full volume) |
+
+The unusual volume values (1045220558, 1065353216) are IEEE 754 single-precision floats interpreted as integers:
+- `0x3F000000` = 0.5 (ducking level)
+- `0x3F800000` = 1.0 (full volume)
+
+### Command 0x0003 (AudioState) Correlation
+
+The adapter sends Command 0x0003 periodically during audio streaming:
+
+| Timestamp | Context |
+|-----------|---------|
+| 69,538ms | During active media playback |
+| 105,414ms | During active media playback |
+| 292,652ms | During active media playback |
+| 439,618ms | Before navigation audio burst |
+| 1,541,614ms | Near end of session |
+
+This appears to be an audio state heartbeat or sync signal.

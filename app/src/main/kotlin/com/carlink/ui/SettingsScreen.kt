@@ -140,6 +140,7 @@ import com.carlink.ui.settings.SampleRateConfig
 import com.carlink.ui.settings.SettingsTab
 import com.carlink.ui.settings.WiFiBandConfig
 import com.carlink.ui.settings.CapturePlaybackContent
+import com.carlink.ui.settings.CaptureRecordingCard
 import com.carlink.ui.theme.AutomotiveDimens
 import kotlinx.coroutines.launch
 import java.io.File
@@ -273,6 +274,7 @@ fun SettingsScreen(
                     SettingsTab.CONTROL -> ControlTabContent(carlinkManager)
                     SettingsTab.LOGS -> LogsTabContent(context, fileLogManager)
                     SettingsTab.PLAYBACK -> PlaybackTabContent(carlinkManager, capturePlaybackManager, onNavigateBack)
+                    SettingsTab.RECORD -> RecordTabContent(carlinkManager)
                 }
             }
         }
@@ -2089,6 +2091,78 @@ private fun PlaybackTabContent(
                     onNavigateBack()
                 },
             )
+        }
+    }
+}
+
+@Composable
+private fun RecordTabContent(carlinkManager: CarlinkManager) {
+    val colorScheme = MaterialTheme.colorScheme
+
+    // Responsive max width - 75% of container width, clamped between 400dp and 1200dp
+    val windowInfo = LocalWindowInfo.current
+    val density = LocalDensity.current
+    val containerWidthDp = with(density) { windowInfo.containerSize.width.toDp() }
+    val maxContentWidth = (containerWidthDp * 0.75f).coerceIn(400.dp, 1200.dp)
+
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.TopCenter,
+    ) {
+        Column(
+            modifier =
+                Modifier
+                    .widthIn(max = maxContentWidth)
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(24.dp),
+        ) {
+            // Storage warning card
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = MaterialTheme.shapes.medium,
+                color = colorScheme.tertiaryContainer.copy(alpha = 0.6f),
+                border = BorderStroke(1.dp, colorScheme.tertiary.copy(alpha = 0.5f)),
+            ) {
+                Row(
+                    modifier = Modifier.padding(16.dp),
+                    verticalAlignment = Alignment.Top,
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = null,
+                        tint = colorScheme.tertiary,
+                        modifier = Modifier.size(24.dp),
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Large File Warning",
+                            style = MaterialTheme.typography.titleSmall.copy(
+                                fontWeight = FontWeight.SemiBold,
+                            ),
+                            color = colorScheme.onTertiaryContainer,
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Recording captures raw video and audio data. Depending on frame size and session length, binary files can easily exceed 500 MB or reach several GBs.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colorScheme.onTertiaryContainer.copy(alpha = 0.9f),
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "It is recommended to record directly onto external storage.",
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                fontWeight = FontWeight.Medium,
+                            ),
+                            color = colorScheme.onTertiaryContainer,
+                        )
+                    }
+                }
+            }
+
+            CaptureRecordingCard(carlinkManager = carlinkManager)
         }
     }
 }

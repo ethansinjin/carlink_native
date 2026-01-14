@@ -315,8 +315,12 @@ oemIconLabel = ${config.boxName}
         // === MINIMAL CONFIG: Always sent (every session) ===
         // - DPI: stored in /tmp/ which is cleared on adapter power cycle
         // - Open: display dimensions may change between sessions
+        // - Android work mode: must be re-sent on each reconnect to restart AA daemon
         messages.add(serializeNumber(config.dpi, FileAddress.DPI))
         messages.add(serializeOpen(config))
+        if (config.androidWorkMode) {
+            messages.add(serializeBoolean(true, FileAddress.ANDROID_WORK_MODE))
+        }
 
         when (initMode) {
             "MINIMAL_ONLY" -> {
@@ -471,6 +475,10 @@ oemIconLabel = ${config.boxName}
 
         if (useMinimalConfig) {
             // Minimal config: adapter retains all other settings from /etc/riddle.conf
+            // Android work mode must be re-sent on each reconnect to restart AA daemon
+            if (config.androidWorkMode) {
+                messages.add(serializeBoolean(true, FileAddress.ANDROID_WORK_MODE))
+            }
             // WiFi Enable sent last to activate wireless mode after config
             messages.add(serializeCommand(CommandMapping.WIFI_ENABLE))
             return messages

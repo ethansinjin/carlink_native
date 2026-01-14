@@ -335,10 +335,27 @@ class CaptureReplaySource(
             // Skip to packet offset if needed
             val skipBytes = packet.offset - currentOffset
             if (skipBytes > 0) {
-                stream.skip(skipBytes)
+                // CRITICAL: InputStream.skip() may not skip the full amount!
+                // We must loop until all bytes are skipped to prevent offset drift.
+                var remaining = skipBytes
+                while (remaining > 0) {
+                    val skipped = stream.skip(remaining)
+                    if (skipped <= 0) {
+                        // No progress - try reading and discarding instead
+                        val discardBuffer = ByteArray(minOf(remaining.toInt(), 8192))
+                        val read = stream.read(discardBuffer, 0, discardBuffer.size)
+                        if (read <= 0) {
+                            logError("[$TAG] Failed to skip to offset ${packet.offset}, stuck at ${packet.offset - remaining}", tag = TAG)
+                            return null
+                        }
+                        remaining -= read
+                    } else {
+                        remaining -= skipped
+                    }
+                }
             } else if (skipBytes < 0) {
                 // Need to re-open stream and seek (can't seek backwards)
-                logError("[$TAG] Cannot seek backwards in stream", tag = TAG)
+                logError("[$TAG] Cannot seek backwards in stream: need to go back ${-skipBytes} bytes", tag = TAG)
                 return null
             }
 

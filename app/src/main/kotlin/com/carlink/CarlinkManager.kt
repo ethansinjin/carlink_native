@@ -4,8 +4,10 @@ import android.content.Context
 import android.hardware.usb.UsbManager
 import android.os.PowerManager
 import android.view.Surface
+import android.net.Uri
 import com.carlink.audio.DualStreamAudioManager
 import com.carlink.audio.MicrophoneCaptureManager
+import com.carlink.capture.CaptureRecordingManager
 import com.carlink.logging.Logger
 import com.carlink.logging.logDebug
 import com.carlink.logging.logError
@@ -164,6 +166,10 @@ class CarlinkManager(
 
     // MediaSession
     private var mediaSessionManager: MediaSessionManager? = null
+
+    // Capture Recording
+    private val captureRecordingManager = CaptureRecordingManager(context)
+    private var isRecordingConfigured = false
 
     // Timers
     private var pairTimeout: Timer? = null
@@ -442,6 +448,12 @@ class CarlinkManager(
         log("Device found, opening")
         usbDevice = device
 
+        // Set recording callback if recording is active (must be before opening)
+        if (captureRecordingManager.isRecording()) {
+            device.setRecordingCallback(createRecordingCallback())
+            logInfo("Recording callback attached to USB device", tag = Logger.Tags.USB)
+        }
+
         if (!device.openWithPermission()) {
             logError("Failed to open USB device", tag = Logger.Tags.USB)
             setState(State.DISCONNECTED)
@@ -652,6 +664,9 @@ class CarlinkManager(
         clearPairTimeout()
         stopFrameInterval()
 
+        // Clear SPS/PPS cache so decoder receives fresh config from playback source
+        h264Renderer?.clearSpsPpsCache()
+
         // Ensure audio is initialized for playback
         if (!audioInitialized && audioManager != null) {
             audioInitialized = audioManager?.initialize() ?: false
@@ -676,11 +691,105 @@ class CarlinkManager(
 
     // ========== End Playback Injection Methods ==========
 
+    // ========== Capture Recording Methods ==========
+
+    /**
+     * Get capture recording manager for UI access to state/stats.
+     */
+    fun getCaptureRecordingManager(): CaptureRecordingManager = captureRecordingManager
+
+    /**
+     * Recording state flow for UI observation.
+     */
+    val recordingState: kotlinx.coroutines.flow.StateFlow<CaptureRecordingManager.State>
+        get() = captureRecordingManager.state
+
+    /**
+     * Recording stats flow for UI observation.
+     */
+    val recordingStats: kotlinx.coroutines.flow.StateFlow<CaptureRecordingManager.Stats>
+        get() = captureRecordingManager.stats
+
+    /**
+     * Configure output directory for capture recording.
+     * Call this before startRecording().
+     *
+     * @param directoryUri SAF URI for output directory
+     * @return True if directory is valid and writable
+     */
+    suspend fun setRecordingOutputDirectory(directoryUri: Uri): Boolean {
+        val result = captureRecordingManager.setOutputDirectory(directoryUri)
+        isRecordingConfigured = result
+        logInfo("Recording output directory ${if (result) "configured" else "failed"}", tag = Logger.Tags.USB)
+        return result
+    }
+
+    /**
+     * Start capture recording.
+     * Can be called BEFORE adapter connection - recording will capture all communication.
+     *
+     * @return True if recording started successfully
+     */
+    suspend fun startRecording(): Boolean {
+        if (!isRecordingConfigured) {
+            logError("Cannot start recording: output directory not configured", tag = Logger.Tags.USB)
+            return false
+        }
+
+        val started = captureRecordingManager.startRecording()
+        if (started) {
+            // Set recording callback on USB device if already connected
+            usbDevice?.setRecordingCallback(createRecordingCallback())
+            logInfo("Recording started: ${captureRecordingManager.getSessionId()}", tag = Logger.Tags.USB)
+        }
+        return started
+    }
+
+    /**
+     * Stop capture recording.
+     * Writes JSON metadata and finalizes capture files.
+     *
+     * @return True if stopped successfully
+     */
+    suspend fun stopRecording(): Boolean {
+        // Clear recording callback from USB device
+        usbDevice?.setRecordingCallback(null)
+
+        val stopped = captureRecordingManager.stopRecording()
+        if (stopped) {
+            logInfo("Recording stopped", tag = Logger.Tags.USB)
+        }
+        return stopped
+    }
+
+    /**
+     * Check if recording is currently active.
+     */
+    fun isRecording(): Boolean = captureRecordingManager.isRecording()
+
+    /**
+     * Create the recording callback that bridges UsbDeviceWrapper to CaptureRecordingManager.
+     * Data is now captured at USB boundary (before ring buffer processing) matching pi-carplay.
+     */
+    private fun createRecordingCallback(): UsbDeviceWrapper.RecordingCallback {
+        return object : UsbDeviceWrapper.RecordingCallback {
+            override fun onPacket(direction: String, type: Int, data: ByteArray) {
+                // Data is already complete (header + payload) from USB layer
+                captureRecordingManager.recordPacket(direction, type, data)
+            }
+        }
+    }
+
+    // ========== End Capture Recording Methods ==========
+
     /**
      * Release all resources.
      */
     fun release() {
         stop()
+
+        // Release capture recording
+        captureRecordingManager.release()
 
         h264Renderer?.stop()
         h264Renderer = null

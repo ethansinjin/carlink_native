@@ -16,16 +16,14 @@ import android.media.MediaCodecInfo;
 import android.media.MediaCodecList;
 import android.media.MediaFormat;
 import android.media.MediaCodecInfo.CodecCapabilities;
-import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Process;
 import android.view.Surface;
-import android.util.Log;
-import android.view.SurfaceHolder;
 
 import androidx.annotation.NonNull;
 
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Locale;
@@ -38,7 +36,6 @@ import com.carlink.util.VideoDebugLogger;
 
 
 public class H264Renderer {
-    private static final String LOG_TAG = "CARLINK";
 
     /** Callback to request keyframe (IDR) from adapter after codec reset. */
     public interface KeyframeRequestCallback {
@@ -56,7 +53,6 @@ public class H264Renderer {
     private Surface surface;
     private volatile boolean running = false;
     private volatile boolean isPaused = false;
-    private final boolean bufferLoopRunning = false;
     private final LogCallback logCallback;
     private KeyframeRequestCallback keyframeCallback;
 
@@ -66,9 +62,6 @@ public class H264Renderer {
 
     private final String preferredDecoderName; // From PlatformDetector (e.g., "OMX.Intel.hw_vd.h264")
 
-    private static final int TARGET_FPS = 60;
-    private static final long DYNAMIC_TIMEOUT_US = 16666; // ~60fps frame duration
-    private boolean decoderInitialized = false;
     private int consecutiveOutputFrames = 0;
 
     // Resolution-adaptive buffer pool
@@ -84,18 +77,17 @@ public class H264Renderer {
     private static final int SMALL_BUFFER_THRESHOLD = 64 * 1024;
     private static final int MEDIUM_BUFFER_THRESHOLD = 256 * 1024;
 
-    // Performance monitoring
-    private long totalFramesReceived = 0;
-    private long totalFramesDecoded = 0;
-    private long totalFramesDropped = 0;
-    private long lastStatsTime = 0;
-    private long codecResetCount = 0;
-    private long totalBytesProcessed = 0;
+    // Performance monitoring (AtomicLong for thread-safe access)
+    private final AtomicLong totalFramesReceived = new AtomicLong(0);
+    private final AtomicLong totalFramesDecoded = new AtomicLong(0);
+    private final AtomicLong totalFramesDropped = new AtomicLong(0);
+    private final AtomicLong lastStatsTime = new AtomicLong(0);
+    private final AtomicLong codecResetCount = new AtomicLong(0);
+    private final AtomicLong totalBytesProcessed = new AtomicLong(0);
 
     // Recovery metrics
-    private long totalRecoveryTimeMs = 0;
+    private final AtomicLong totalRecoveryTimeMs = new AtomicLong(0);
     private int recoveryCount = 0;
-    private long lastRecoveryTimeMs = 0;
 
     // Adaptive FPS detection
     private int detectedTargetFps = 60;
@@ -241,12 +233,11 @@ public class H264Renderer {
 
         running = true;
         isPaused = false;  // Reset paused state on fresh start
-        lastStatsTime = System.currentTimeMillis();
-        totalFramesReceived = 0;
-        totalFramesDecoded = 0;
-        totalFramesDropped = 0;
-        totalBytesProcessed = 0;
-        decoderInitialized = false;
+        lastStatsTime.set(System.currentTimeMillis());
+        totalFramesReceived.set(0);
+        totalFramesDecoded.set(0);
+        totalFramesDropped.set(0);
+        totalBytesProcessed.set(0);
         consecutiveOutputFrames = 0;
 
         log("start - Resolution: " + width + "x" + height + ", Surface: " + (surface != null));
@@ -432,9 +423,9 @@ public class H264Renderer {
         }
 
         lastResetTime = currentTime;
-        codecResetCount++;
-        log("reset codec - count: " + codecResetCount + ", decoded: " + totalFramesDecoded);
-        VideoDebugLogger.logCodecReset(codecResetCount);
+        long resetCount = codecResetCount.incrementAndGet();
+        log("reset codec - count: " + resetCount + ", decoded: " + totalFramesDecoded.get());
+        VideoDebugLogger.logCodecReset(resetCount);
 
         synchronized (codecLock) {
             codecAvailableBufferIndexes.clear();
@@ -646,7 +637,7 @@ public class H264Renderer {
     }
 
 
-    private void initCodec(int width, int height, Surface surface) throws Exception {
+    private void initCodec(int width, int height, Surface surface) throws IOException {
         log("init codec: " + width + "x" + height);
 
         MediaCodec codec = null;
@@ -660,7 +651,7 @@ public class H264Renderer {
                 codecName = preferredDecoderName;
                 selectedCodecInfo = findCodecInfo(preferredDecoderName);
                 log("Using decoder: " + codecName);
-            } catch (Exception e) {
+            } catch (IOException e) {
                 log("Preferred decoder unavailable: " + e.getMessage());
             }
         }
@@ -672,8 +663,8 @@ public class H264Renderer {
                 codecName = codec.getName();
                 selectedCodecInfo = findCodecInfo(codecName);
                 log("Using decoder: " + codecName);
-            } catch (Exception e2) {
-                throw new Exception("No H.264 decoder available", e2);
+            } catch (IOException e2) {
+                throw new IOException("No H.264 decoder available", e2);
             }
         }
 
@@ -690,7 +681,7 @@ public class H264Renderer {
                 CodecCapabilities caps = codecInfo.getCapabilitiesForType("video/avc");
                 lowLatencySupported = caps.isFeatureSupported(CodecCapabilities.FEATURE_LowLatency);
             } catch (Exception e) {
-                // Ignore
+                log("Failed to check low latency support: " + e.getMessage());
             }
         }
         if (lowLatencySupported) {
@@ -707,7 +698,7 @@ public class H264Renderer {
         try {
             mediaformat.setInteger(MediaFormat.KEY_PRIORITY, 0); // Realtime
         } catch (Exception e) {
-            // Ignore
+            log("Failed to set KEY_PRIORITY: " + e.getMessage());
         }
 
         // Intel-specific: disable Adaptive Playback (causes high latency)
@@ -717,7 +708,7 @@ public class H264Renderer {
                 mediaformat.setInteger("max-concurrent-instances", 1);
                 log("Intel optimizations applied");
             } catch (Exception e) {
-                // Ignore
+                log("Failed to apply Intel optimizations: " + e.getMessage());
             }
         }
 
@@ -761,8 +752,8 @@ public class H264Renderer {
     }
 
     public void processDataDirect(int length, int skipBytes, PacketRingByteBuffer.DirectWriteCallback callback) {
-        totalFramesReceived++;
-        totalBytesProcessed += length;
+        totalFramesReceived.incrementAndGet();
+        totalBytesProcessed.addAndGet(length);
 
         long currentTime = System.currentTimeMillis();
         if (currentTime - lastPerfLogTime >= PERF_LOG_INTERVAL_MS) {
@@ -809,57 +800,6 @@ public class H264Renderer {
 
         poolInitialized = true;
         log("Pool: " + smallCount + "/" + mediumCount + "/" + largeCount + " buffers for " + width + "x" + height);
-    }
-
-    private ByteBuffer getPooledBuffer(int minimumSize) {
-        ByteBuffer buffer = null;
-
-        if (minimumSize <= SMALL_BUFFER_THRESHOLD) {
-            buffer = smallBuffers.poll();
-            if (buffer == null) buffer = mediumBuffers.poll();
-        } else if (minimumSize <= MEDIUM_BUFFER_THRESHOLD) {
-            buffer = mediumBuffers.poll();
-            if (buffer == null) buffer = largeBuffers.poll();
-        } else {
-            buffer = largeBuffers.poll();
-        }
-
-        if (buffer == null || buffer.capacity() < minimumSize) {
-            int newSize = Math.max(minimumSize, 128 * 1024);
-            buffer = ByteBuffer.allocateDirect(newSize);
-            buffer.order(ByteOrder.LITTLE_ENDIAN);
-            log("[POOL_EXPAND] " + (newSize / 1024) + "KB");
-        }
-
-        buffer.clear();
-        secureBufferClear(buffer);
-        return buffer;
-    }
-
-    private void returnPooledBuffer(ByteBuffer buffer) {
-        if (buffer == null) return;
-
-        buffer.clear();
-        int capacity = buffer.capacity();
-        boolean returned = false;
-
-        // Use same 50:30:20 distribution as initializeBufferPool
-        int maxSmall = (bufferPoolSize * 50) / 100;
-        int maxMedium = (bufferPoolSize * 30) / 100;
-        int maxLarge = bufferPoolSize - maxSmall - maxMedium;
-
-        if (capacity <= SMALL_BUFFER_THRESHOLD && smallBuffers.size() < maxSmall) {
-            smallBuffers.offer(buffer);
-            returned = true;
-        } else if (capacity <= MEDIUM_BUFFER_THRESHOLD && mediumBuffers.size() < maxMedium) {
-            mediumBuffers.offer(buffer);
-            returned = true;
-        } else if (capacity > MEDIUM_BUFFER_THRESHOLD && largeBuffers.size() < maxLarge) {
-            largeBuffers.offer(buffer);
-            returned = true;
-        }
-
-        // !returned: buffer discarded, will be GC'd
     }
 
     /** Zero buffer contents (called on session end). */
@@ -985,24 +925,18 @@ public class H264Renderer {
                     }
 
                     if (info.size > 0) {
-                        totalFramesDecoded++;
+                        long decodedCount = totalFramesDecoded.incrementAndGet();
                         consecutiveOutputFrames++;
                         framesDecodedSinceReset++;
-
-                        // Mark decoder as initialized after first few successful outputs
-                        if (consecutiveOutputFrames >= 3) {
-                            decoderInitialized = true;
-                        }
 
                         // Disable keyframe detection once we're successfully decoding
                         // Also log recovery metrics when video recovers after reset
                         if (pendingKeyframeRequest && framesDecodedSinceReset >= 3) {
                             // Calculate and log recovery time
                             long recoveryTime = System.currentTimeMillis() - resetTimestamp;
-                            totalRecoveryTimeMs += recoveryTime;
+                            totalRecoveryTimeMs.addAndGet(recoveryTime);
                             recoveryCount++;
-                            lastRecoveryTimeMs = recoveryTime;
-                            long avgRecoveryTime = totalRecoveryTimeMs / recoveryCount;
+                            long avgRecoveryTime = totalRecoveryTimeMs.get() / recoveryCount;
                             log("[RECOVERY] Video recovered in " + recoveryTime + "ms " +
                                 "(avg: " + avgRecoveryTime + "ms, count: " + recoveryCount + ")");
                             pendingKeyframeRequest = false;
@@ -1010,11 +944,11 @@ public class H264Renderer {
                         }
 
                         // Log first decoded frame for debugging
-                        if (totalFramesDecoded == 1) {
+                        if (decodedCount == 1) {
                             log("[CALLBACK] First frame decoded! size=" + info.size);
                         }
                     } else {
-                        totalFramesDropped++;
+                        totalFramesDropped.incrementAndGet();
                     }
 
                     final boolean doRender = (info.size != 0);
@@ -1111,23 +1045,31 @@ public class H264Renderer {
 
     private void logPerformanceStats() {
         long currentTime = System.currentTimeMillis();
-        long timeDiff = currentTime - lastStatsTime;
+        long lastStats = lastStatsTime.get();
+        long timeDiff = currentTime - lastStats;
 
         if (timeDiff > 0) {
-            double fps = (double) totalFramesDecoded * 1000.0 / timeDiff;
-            double dropRate = totalFramesDropped > 0 ? (double) totalFramesDropped / (totalFramesReceived + totalFramesDropped) * 100.0 : 0.0;
-            double avgFrameSize = totalFramesReceived > 0 ? (double) totalBytesProcessed / totalFramesReceived / 1024.0 : 0.0;
-            double throughputMbps = (double) totalBytesProcessed * 8.0 / (timeDiff * 1000.0); // Mbps
+            // Get current values atomically
+            long framesReceived = totalFramesReceived.get();
+            long framesDecoded = totalFramesDecoded.get();
+            long framesDropped = totalFramesDropped.get();
+            long bytesProcessed = totalBytesProcessed.get();
+            long resets = codecResetCount.get();
+
+            double fps = (double) framesDecoded * 1000.0 / timeDiff;
+            double dropRate = framesDropped > 0 ? (double) framesDropped / (framesReceived + framesDropped) * 100.0 : 0.0;
+            double avgFrameSize = framesReceived > 0 ? (double) bytesProcessed / framesReceived / 1024.0 : 0.0;
+            double throughputMbps = (double) bytesProcessed * 8.0 / (timeDiff * 1000.0); // Mbps
 
             // Adaptive FPS target detection - find closest common frame rate
             // This prevents false warnings when adapter is configured for 30fps instead of 60fps
-            if (totalFramesReceived > 60) { // Need enough samples for reliable detection
+            if (framesReceived > 60) { // Need enough samples for reliable detection
                 detectedTargetFps = findClosestFpsTarget(fps);
             }
 
             // Enhanced logging for Intel GPU performance analysis
             String perfMsg = String.format(Locale.US, "[PERF] FPS: %.1f/%d, Frames: R:%d/D:%d/Drop:%d, DropRate: %.1f%%, AvgSize: %.1fKB, Throughput: %.1fMbps, Resets: %d",
-                fps, detectedTargetFps, totalFramesReceived, totalFramesDecoded, totalFramesDropped, dropRate, avgFrameSize, throughputMbps, codecResetCount);
+                fps, detectedTargetFps, framesReceived, framesDecoded, framesDropped, dropRate, avgFrameSize, throughputMbps, resets);
 
             // Add Intel GPU specific metrics if available
             if (mCodec != null && mCodec.getName().contains("Intel")) {
@@ -1137,12 +1079,12 @@ public class H264Renderer {
             // Warning only if FPS is significantly below detected target (< 90% of target)
             // This avoids false alarms when adapter is configured for lower frame rates
             double fpsThreshold = detectedTargetFps * 0.90;
-            if (fps < fpsThreshold && totalFramesReceived > 120) {
+            if (fps < fpsThreshold && framesReceived > 120) {
                 perfMsg += String.format(Locale.US, " [WARNING: FPS below %.0f%% of %dfps target]", 90.0, detectedTargetFps);
             }
 
             // Monitor frame lag for performance analysis (no aggressive action)
-            long frameLag = totalFramesReceived - totalFramesDecoded;
+            long frameLag = framesReceived - framesDecoded;
             if (frameLag > 10) { // Conservative threshold for monitoring only
                 perfMsg += " [INFO: Frame lag " + frameLag + "]";
             }
@@ -1163,19 +1105,19 @@ public class H264Renderer {
             log(perfMsg);
 
             // Also log via VideoDebugLogger for structured debugging
-            VideoDebugLogger.logPerformanceStats(fps, totalFramesReceived, totalFramesDecoded,
-                    totalFramesDropped, dropRate, throughputMbps);
+            VideoDebugLogger.logPerformanceStats(fps, framesReceived, framesDecoded,
+                    framesDropped, dropRate, throughputMbps);
             VideoDebugLogger.logBufferPoolStatus(smallBuffers.size(), mediumBuffers.size(),
                     largeBuffers.size(), bufferPoolSize);
 
             // Reset counters for next measurement period
-            totalFramesReceived = 0;
-            totalFramesDecoded = 0;
-            totalFramesDropped = 0;
-            totalBytesProcessed = 0;
+            totalFramesReceived.set(0);
+            totalFramesDecoded.set(0);
+            totalFramesDropped.set(0);
+            totalBytesProcessed.set(0);
         }
 
-        lastStatsTime = currentTime;
+        lastStatsTime.set(currentTime);
     }
 
     /**
@@ -1351,6 +1293,20 @@ public class H264Renderer {
     }
 
     /**
+     * Clears cached SPS/PPS data.
+     * Call when switching video sources (e.g., live to playback, or between capture files)
+     * to ensure decoder receives fresh configuration from the new source.
+     */
+    public void clearSpsPpsCache() {
+        synchronized (spsLock) {
+            cachedSps = null;
+            cachedPps = null;
+            codecConfigPending = false;
+            log("[SPS_CACHE] Cache cleared for new session");
+        }
+    }
+
+    /**
      * Signals that codec config (SPS/PPS) should be injected on the next available input buffer.
      * This is called after flush/reset to ensure decoder has codec-specific data.
      *
@@ -1430,9 +1386,13 @@ public class H264Renderer {
      * This ensures decoder always has fresh configuration with each keyframe,
      * preventing video degradation during continuous operation.
      *
+     * Per Android documentation: "After calling getInputBuffer() any ByteBuffer
+     * previously returned for the same input index MUST no longer be used."
+     * Therefore, we must copy the IDR data BEFORE modifying the buffer.
+     *
      * @param codec The MediaCodec instance
      * @param bufferIndex The available input buffer index
-     * @param frameData The original IDR frame data
+     * @param frameData The codec input buffer containing IDR frame data (from getInputBuffer)
      * @param frameSize Size of the IDR frame data
      * @param pts Presentation timestamp
      * @return true if successful, false otherwise
@@ -1446,34 +1406,32 @@ public class H264Renderer {
             }
 
             try {
-                ByteBuffer inputBuffer = codec.getInputBuffer(bufferIndex);
-                if (inputBuffer == null) {
-                    return false;
-                }
-
                 int totalSize = cachedSps.length + cachedPps.length + frameSize;
-                if (inputBuffer.capacity() < totalSize) {
-                    log("[IDR_INJECT] Buffer too small for SPS+PPS+IDR: " + inputBuffer.capacity() + " < " + totalSize);
+                if (frameData.capacity() < totalSize) {
+                    log("[IDR_INJECT] Buffer too small for SPS+PPS+IDR: " + frameData.capacity() + " < " + totalSize);
                     return false;
                 }
 
-                // Build combined buffer: SPS + PPS + IDR
-                inputBuffer.clear();
-                inputBuffer.put(cachedSps);
-                inputBuffer.put(cachedPps);
-
-                // Copy IDR frame data
-                int originalPosition = frameData.position();
-                frameData.position(0);
-                for (int i = 0; i < frameSize; i++) {
-                    inputBuffer.put(frameData.get(i));
+                // Step 1: Copy IDR data to temporary buffer BEFORE overwriting
+                // This is critical - frameData will be modified in place
+                if (combinedBuffer == null || combinedBuffer.length < frameSize) {
+                    combinedBuffer = new byte[Math.max(frameSize, 256 * 1024)];
                 }
-                frameData.position(originalPosition);
+                frameData.position(0);
+                frameData.get(combinedBuffer, 0, frameSize);
 
+                // Step 2: Build combined buffer in frameData: SPS + PPS + IDR
+                // No need to call getInputBuffer() again - frameData IS the input buffer
+                frameData.clear();
+                frameData.put(cachedSps);
+                frameData.put(cachedPps);
+                frameData.put(combinedBuffer, 0, frameSize);
+
+                // Step 3: Queue to codec
                 codec.queueInputBuffer(bufferIndex, 0, totalSize, pts, 0);
 
                 // Log occasionally to avoid spam
-                if (totalFramesDecoded % 100 == 0) {
+                if (totalFramesDecoded.get() % 100 == 0) {
                     log("[IDR_INJECT] Prepended SPS+PPS to IDR frame (total: " + totalSize + " bytes)");
                 }
                 return true;

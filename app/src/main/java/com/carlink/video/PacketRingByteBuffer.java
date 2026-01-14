@@ -52,16 +52,21 @@ public class PacketRingByteBuffer {
         }
     }
 
+    /** Set callback for logging messages. */
+    public void setLogCallback(LogCallback callback) {
+        this.logCallback = callback;
+    }
+
     /** Set callback to be notified when emergency reset occurs (all data lost). */
     public void setEmergencyResetCallback(EmergencyResetCallback callback) {
         this.emergencyResetCallback = callback;
     }
 
-    public boolean isEmpty() {
+    public synchronized boolean isEmpty() {
         return packetCount == 0;
     }
 
-    public int availablePacketsToRead() {
+    public synchronized int availablePacketsToRead() {
         return packetCount;
     }
 
@@ -394,7 +399,7 @@ public class PacketRingByteBuffer {
                 ((buffer[offset+3])       & 0x000000FF);
     }
 
-    public void reset() {
+    public synchronized void reset() {
         packetCount = 0;
         writePosition = 0;
         readPosition = 0;

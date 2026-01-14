@@ -109,6 +109,54 @@ The playback toggle in settings:
 
 ## Captured Packet Structure
 
+### IMPORTANT: Capture Format Differences (pi-carplay vs carlink_native)
+
+The capture format differs between pi-carplay and carlink_native implementations. This affects header parsing.
+
+**pi-carplay format** (original, with 12-byte record prefix):
+```
+Offset  Size  Description
+──────  ────  ───────────────────────────────────
+0       12    Capture record prefix (length, offset, type)
+12      16    Protocol header (magic, length, type, checksum)
+28      20    Video header (width, height, flags, pts, reserved)
+48      N     H.264 Annex B data (with start codes)
+```
+**Total header size: 48 bytes**
+
+**carlink_native format** (direct protocol, no record prefix):
+```
+Offset  Size  Description
+──────  ────  ───────────────────────────────────
+0       16    Protocol header (magic, length, type, checksum)
+16      20    Video header (width, height, flags, pts, reserved)
+36      N     H.264 Annex B data (with start codes)
+```
+**Total header size: 36 bytes**
+
+### Key Differences
+
+| Aspect | pi-carplay | carlink_native |
+|--------|------------|----------------|
+| **Record prefix** | 12-byte prefix before magic | None - starts with magic |
+| **Video header offset** | 48 bytes | 36 bytes |
+| **Audio header offset** | 40 bytes | 28 bytes |
+| **Timestamp embedding** | `comm` marker + 8-byte PTS in payload | No internal timestamp marker |
+| **File organization** | Separate files per stream (-video.bin, -audio.bin, etc.) | Single interleaved file |
+
+### Detecting Capture Format
+
+Check the first 4 bytes of the binary:
+- If `aa 55 aa 55` → carlink_native format (36-byte video header)
+- If NOT magic → pi-carplay format (48-byte video header, skip 12-byte prefix)
+
+```kotlin
+// Example detection
+val magic = ByteBuffer.wrap(data, 0, 4).order(ByteOrder.LITTLE_ENDIAN).int
+val isPiCarplayFormat = (magic != 0x55AA55AA)
+val videoHeaderSize = if (isPiCarplayFormat) 48 else 36
+```
+
 ### Video Packets (Type 6)
 
 The capture stores full USB packets with multiple headers:
@@ -116,27 +164,27 @@ The capture stores full USB packets with multiple headers:
 ```
 Offset  Size  Description
 ──────  ────  ───────────────────────────────────
-0       12    Capture prefix (length, flags, type)
+0       12    Capture prefix (length, flags, type) [pi-carplay only]
 12      16    Protocol header (magic, length, type, reserved)
 28      20    Video header (width, height, flags, length, unknown)
 48      N     H.264 Annex B data (with start codes)
 ```
 
-**Total header size: 48 bytes**
+**Total header size: 48 bytes (pi-carplay) / 36 bytes (carlink_native)**
 
 ### Audio Packets (Type 7)
 
 ```
 Offset  Size  Description
 ──────  ────  ───────────────────────────────────
-0       12    Capture prefix
+0       12    Capture prefix [pi-carplay only]
 12      16    Protocol header
 28      12    Audio header (decode_type, volume, audio_type)
 40      N     PCM audio data
 ```
 
-**Total header size: 40 bytes**
-**Audio header offset: 28 bytes** (for parsing decode_type/audio_type)
+**Total header size: 40 bytes (pi-carplay) / 28 bytes (carlink_native)**
+**Audio header offset: 28 bytes (pi-carplay) / 16 bytes (carlink_native)**
 
 ## Implementation Issues and Fixes
 
@@ -454,6 +502,165 @@ Capture config in JSON file:
 
 Note: If `includeAudioData` is false, audio will not play during capture playback.
 
+## Issue 11: Video Freeze at Consistent Timestamps (Jan 2026)
+
+### Symptom
+
+Playing back carlink_native captures resulted in video freezing at the exact same timestamp every time (e.g., 2:41 into a 25:13 recording). The video would freeze, and subsequent NAL types showed `-1` (parsing failure), indicating data corruption.
+
+Pi-carplay captures of the same duration played back without any issues.
+
+### Investigation
+
+**Log analysis showed:**
+```
+Video packet #598: NAL type=1  (valid P-frame)
+Video packet #599: NAL type=1  (valid P-frame)
+Video packet #600: NAL type=-1 (CORRUPT - can't find start code)
+Video packet #601: NAL type=-1 (CORRUPT)
+```
+
+**Key observation:** Pi-carplay captures worked perfectly. Same playback code, different capture source.
+
+### Root Cause: Capture Point Too Late in Pipeline
+
+**Pi-carplay** captures data at the USB boundary, BEFORE any processing:
+```
+USB Read → [CAPTURE HERE] → Ring Buffer → Video Processing
+```
+
+**carlink_native** (before fix) captured AFTER ring buffer processing:
+```
+USB Read → Ring Buffer → Video Processing → [CAPTURE HERE]
+```
+
+This caused a **race condition**: The ring buffer could be partially overwritten by subsequent USB reads before the capture callback saved the data, resulting in corrupted packets at consistent points where timing aligned poorly.
+
+### Fix Applied (Jan 13, 2026)
+
+**1. Moved capture point earlier in `UsbDeviceWrapper.kt`:**
+
+Changed from capturing post-ring-buffer to capturing immediately after USB read:
+
+```kotlin
+// NEW APPROACH: Read into raw buffer FIRST, capture immediately, THEN process
+if (activeRecordingCallback != null) {
+    // Step 1: Read raw USB data into capture buffer
+    var totalRead = 0
+    while (totalRead < header.length && _isReadingLoopActive.get()) {
+        val chunkRead = conn.bulkTransfer(endpoint, rawCaptureBuffer, totalRead, chunkSize, timeout)
+        if (chunkRead > 0) totalRead += chunkRead
+        else break
+    }
+
+    // Step 2: Record IMMEDIATELY (before any processing)
+    if (totalRead > 0) {
+        val completePacket = ByteArray(16 + totalRead)
+        System.arraycopy(headerBuffer, 0, completePacket, 0, 16)
+        System.arraycopy(rawCaptureBuffer!!, 0, completePacket, 16, totalRead)
+        activeRecordingCallback.onPacket("IN", header.type.id, completePacket)
+    }
+
+    // Step 3: NOW process for video rendering (copy to ring buffer)
+    if (totalRead == header.length) {
+        videoProcessor.processVideoDirect(header.length) { buffer, offset, _ ->
+            System.arraycopy(rawCaptureBuffer!!, 0, buffer, offset, totalRead)
+            totalRead
+        }
+    }
+}
+```
+
+**2. Simplified `RecordingCallback` interface:**
+
+Changed from separate header/payload parameters to single complete packet:
+```kotlin
+// Before:
+fun onPacket(direction: String, type: Int, header: ByteArray, payload: ByteArray)
+
+// After:
+fun onPacket(direction: String, type: Int, data: ByteArray)
+```
+
+**3. Fixed `CaptureReplaySource.readPacketData()` - InputStream.skip() unreliability:**
+
+`InputStream.skip()` may not skip the full requested amount. Added retry loop:
+```kotlin
+var remaining = skipBytes
+while (remaining > 0) {
+    val skipped = stream.skip(remaining)
+    if (skipped <= 0) {
+        // Fallback: read and discard
+        val discardBuffer = ByteArray(minOf(remaining.toInt(), 8192))
+        val read = stream.read(discardBuffer, 0, discardBuffer.size)
+        if (read <= 0) {
+            logError("Failed to skip to offset")
+            return null
+        }
+        remaining -= read
+    } else {
+        remaining -= skipped
+    }
+}
+```
+
+**4. Fixed `CapturePlaybackManager` PROTOCOL_MAGIC byte order:**
+
+```kotlin
+// Before (wrong):
+private val PROTOCOL_MAGIC = byteArrayOf(0x55.toByte(), 0xAA.toByte(), 0x55.toByte(), 0xAA.toByte())
+
+// After (correct - little-endian storage):
+private val PROTOCOL_MAGIC = byteArrayOf(0xAA.toByte(), 0x55.toByte(), 0xAA.toByte(), 0x55.toByte())
+```
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `UsbDeviceWrapper.kt` | New capture point before ring buffer, simplified callback interface |
+| `CarlinkManager.kt` | Updated to use new callback interface |
+| `CaptureReplaySource.kt` | Fixed InputStream.skip() reliability |
+| `CapturePlaybackManager.kt` | Fixed PROTOCOL_MAGIC byte order |
+
+### Performance Considerations
+
+The new capture approach allocates a new `ByteArray` per video frame to ensure data isolation (prevents race conditions). This creates GC pressure.
+
+**Impact analysis at different resolutions:**
+
+| Scenario | Frame Budget | Allocations/sec | Impact |
+|----------|--------------|-----------------|--------|
+| 1080p @ 30fps | 33ms | ~3MB | Negligible |
+| 2400x960 @ 60fps | 16.67ms | ~18MB+ | Potential GC pauses |
+
+**Trade-offs:**
+- **Current approach (allocate per-frame):** Safe from race conditions, but GC pressure at high resolutions
+- **Buffer pool approach:** Would eliminate allocations but requires careful synchronization to prevent reuse-before-write bugs
+
+**Non-recording path is unchanged** - zero-copy directly into ring buffer with no performance impact during normal usage.
+
+### Testing Status
+
+**Completed:**
+- Build compiles successfully
+- Code review complete
+
+**Pending (requires device testing):**
+- [ ] Verify carlink_native captures no longer corrupt at consistent timestamps
+- [ ] Test playback of newly recorded captures
+- [ ] Performance testing at 2400x960 @ 60fps to check for GC-related frame drops
+- [ ] Compare capture file sizes between old and new implementations
+
+### Session End Point (Jan 13, 2026)
+
+Investigation and implementation complete. Ready for device testing to validate:
+1. Recording no longer produces corrupted captures
+2. Playback performance is acceptable at high resolution/framerate
+3. No regression in live video performance when not recording
+
+If GC pauses cause issues during recording at high resolutions, consider implementing a buffer pool with proper synchronization.
+
 ## Future Improvements
 
 - Seek/scrub functionality
@@ -461,3 +668,4 @@ Note: If `includeAudioData` is false, audio will not play during capture playbac
 - Speed control (0.5x, 2x, etc.)
 - Looping playback
 - Skip initial handshake delay option (start from first video packet)
+- Buffer pool for recording to reduce GC pressure at high resolutions

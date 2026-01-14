@@ -7,7 +7,7 @@
 - Firmware rootfs analysis
 - USB captures: `~/.pi-carplay/usb-logs/video_2400x960@60/` (Dec 2025)
 
-**Last Updated:** 2026-01-11 (with January 2026 raw USB capture verification)
+**Last Updated:** 2026-01-13 (with January 2026 carlink_native vs pi-carplay capture comparison)
 
 ## Hardware Specifications
 **CPC200-CCPA (Internal: A15W)**
@@ -311,7 +311,7 @@ Level 5.0 supports up to 4096×2304 @ 30fps or 2560×1920 @ 50fps, providing hea
 | 7 | 1 | 25 B | 25 B | SPS |
 | 8 | 1 | 8 B | 8 B | PPS |
 
-**Critical Finding:** Only **1 IDR frame** in the entire 358-second session. The stream relies entirely on P-frames after initial keyframe, with recovery dependent on `requestIDR` command.
+**Note:** This pi-carplay capture shows only 1 IDR frame because pi-carplay does NOT send Frame sync (0x0C) commands to request additional keyframes. See the January 2026 Capture Comparison section below for the full picture.
 
 ### Frame Packaging Model
 
@@ -411,8 +411,98 @@ Min: 393 bytes | Max: 152,281 bytes | Avg: 6,150 bytes
 
 With only 1 IDR frame at stream start:
 - **Data Loss Impact:** Any corrupted or lost P-frame propagates errors until manual IDR request
-- **Recovery Mechanism:** Host must send `requestIDR` command (type 8, value 0x3F1)
+- **Recovery Mechanism:** Host must send Frame sync command (0x0C) - see Jan 2026 findings below
 - **Recommended IDR Interval:** 2-5 seconds for robust playback (per revisions.txt v40)
+
+---
+
+## January 2026 Capture Comparison Analysis
+
+**Source Files:**
+- carlink_native: `carlink_capture-2026-01-13T15-37-17-527Z.bin/.json`
+- pi-carplay: `pi-carplay_capture-2026-01-13T11-01-01-667Z.bin/.json`
+
+This section documents findings from comparing carlink_native and pi-carplay capture files to verify adapter IDR behavior.
+
+### CRITICAL FINDING: Frame Sync Triggers IDR Response
+
+**Verified Correlation:**
+
+| Frame Sync Sent | IDR Frame Received | Delta | Evidence |
+|-----------------|-------------------|-------|----------|
+| 41,297ms | 41,395ms | **98ms** | SPS+PPS+IDR at offset 496169 |
+| 440,859ms | 441,040ms | **181ms** | SPS+PPS+IDR at offset 246964797 |
+
+The adapter responds to Frame sync (Command 0x0C) with a complete keyframe sequence:
+```
+[SPS: 00 00 00 01 27 64 00 32 ac 13 14 50...]
+[PPS: 00 00 00 01 28 ee 3c b0]
+[IDR: 00 00 00 01 25 b8 00 40 00 93 ff...]
+```
+
+### Comparative NAL Unit Statistics
+
+| Metric | carlink_native | pi-carplay | Ratio |
+|--------|---------------|------------|-------|
+| **IDR Frames (0x25)** | 107 | 27 | 4.0x |
+| **SPS Units (0x27)** | 118 | 33 | 3.6x |
+| **PPS Units (0x28)** | 103 | 28 | 3.7x |
+| **Non-IDR P/B (0x21/41/61)** | ~25,272 | ~9,094 | 2.8x |
+| **Video Packets** | 57,505 | 19,974 | 2.9x |
+| **Session Duration** | 1545s | 358s | 4.3x |
+
+### Behavioral Differences Explaining IDR Variance
+
+| Behavior | carlink_native | pi-carplay |
+|----------|---------------|------------|
+| **Sends Frame sync (0x0C)** | YES (2 observed) | NO |
+| **OPEN format field** | 5 (Full H.264) | 1 (Basic) |
+| **Receives 0x3F1 notification** | YES | NO |
+| **OUT Command 0x0004** | NO | YES (5 times) |
+
+### Root Cause Analysis
+
+1. **carlink_native uses format=5** in OPEN command, enabling full keyframe recovery support
+2. **carlink_native sends Frame sync (0x0C)** → adapter responds with fresh SPS/PPS/IDR within ~100-200ms
+3. **pi-carplay uses format=1** and sends Command 0x0004 (status query) instead of Frame sync
+4. **Adapter behavior adapts** based on format field and command usage
+
+### IDR Request Mechanism (Corrected)
+
+**Previous Understanding:** Send `requestIDR` (Command type 8, value 0x3F1) to request keyframe
+
+**Corrected Understanding:**
+- Send **Frame sync (Command 0x0C)** to trigger IDR delivery
+- Adapter responds with SPS+PPS+IDR within 100-200ms
+- Adapter may send **0x3F1 notification** (Device → Host) after IDR delivery
+- The 0x3F1 is a **notification**, not a request
+
+### H.264 Encoding Parameters (Identical)
+
+Both captures use the same H.264 configuration:
+```
+Profile:     High (100 / 0x64)
+Level:       5.0 (50 / 0x32)
+Resolution:  2400 × 960
+SPS:         27 64 00 32 ac 13 14 50 09 60 79 a6 e0 21 a0 c0 da 08 84 65 80
+PPS:         28 ee 3c b0
+```
+
+### Video Packet Size Distribution
+
+| Capture | Min | Max | Avg | First Packet |
+|---------|-----|-----|-----|--------------|
+| carlink_native | ~800 B | ~65 KB | ~3-17 KB | 3,576 B |
+| pi-carplay | ~400 B | ~152 KB | ~6 KB | 39,274 B |
+
+carlink_native uses more fragmented packets (smaller average size, more packets per frame).
+
+### Implications for Video Recovery
+
+1. **Always send Frame sync (0x0C)** for keyframe recovery, not 0x3F1
+2. **Use format=5** in OPEN command to enable full keyframe recovery support
+3. **Expect ~100-200ms latency** between Frame sync and IDR delivery
+4. **IDR frames include complete SPS+PPS** - no need to cache from stream start
 
 ### Adapter TTY Log Correlation
 
