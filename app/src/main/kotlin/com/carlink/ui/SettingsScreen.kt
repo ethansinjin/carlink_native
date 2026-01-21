@@ -337,6 +337,7 @@ private fun ControlTabContent(carlinkManager: CarlinkManager) {
                         enabled = isDeviceConnected && !isProcessing,
                         isProcessing = isProcessing,
                         onClick = {
+                            logWarn("[UI_ACTION] Disconnect Phone button clicked", tag = "UI")
                             carlinkManager.stop()
                         },
                     )
@@ -350,6 +351,7 @@ private fun ControlTabContent(carlinkManager: CarlinkManager) {
                         enabled = isDeviceConnected && !isProcessing,
                         isProcessing = isProcessing,
                         onClick = {
+                            logWarn("[UI_ACTION] Close Adapter button clicked", tag = "UI")
                             carlinkManager.stop()
                         },
                     )
@@ -367,6 +369,7 @@ private fun ControlTabContent(carlinkManager: CarlinkManager) {
                         enabled = !isProcessing,
                         isProcessing = isProcessing,
                         onClick = {
+                            logWarn("[UI_ACTION] Reset Video Decoder button clicked", tag = "UI")
                             carlinkManager.resetVideoDecoder()
                         },
                     )
@@ -380,6 +383,7 @@ private fun ControlTabContent(carlinkManager: CarlinkManager) {
                         enabled = isDeviceConnected && !isProcessing,
                         isProcessing = isProcessing,
                         onClick = {
+                            logWarn("[UI_ACTION] Reset USB Device button clicked", tag = "UI")
                             isProcessing = true
                             scope.launch {
                                 try {
@@ -1018,7 +1022,10 @@ private fun AdapterConfigurationDialog(
                 ) {
                     // Cancel button
                     TextButton(
-                        onClick = onDismiss,
+                        onClick = {
+                            logWarn("[UI_ACTION] Adapter Config: Cancel button clicked", tag = "UI")
+                            onDismiss()
+                        },
                         modifier = Modifier.weight(1f),
                     ) {
                         Text("Cancel")
@@ -1027,6 +1034,7 @@ private fun AdapterConfigurationDialog(
                     // Default button
                     TextButton(
                         onClick = {
+                            logWarn("[UI_ACTION] Adapter Config: Reset to Defaults clicked - next session will run FULL init", tag = "UI")
                             scope.launch {
                                 adapterConfigPreference.resetToDefaults()
                                 onDismiss()
@@ -1040,6 +1048,7 @@ private fun AdapterConfigurationDialog(
                     // Apply & Restart button - all adapter config changes require restart
                     Button(
                         onClick = {
+                            logWarn("[UI_ACTION] Adapter Config: Apply & Restart clicked - audio=$selectedAudioSource, sampleRate=$selectedSampleRate, mic=$selectedMicSource, wifi=$selectedWifiBand, callQuality=$selectedCallQuality", tag = "UI")
                             scope.launch {
                                 // Save all configuration
                                 adapterConfigPreference.setAudioSource(selectedAudioSource)

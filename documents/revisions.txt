@@ -62,3 +62,5 @@
 [45] :: SPS/PPS Cache fix
 [46] :: Static Analysis Tool code correction. Video Code changes according to Google H264 guidelines. Test session record
 [47] :: Session Record Function Testing and some Settings UI reorganization.
+[48] :: Turned off App Integrity in Play Console.
+[49} :: the reset to adapter defaults resetToDefaults() now clears/forces a full init on next launch. Added log events for control UI button uses. Also testing single boxName string for all labels

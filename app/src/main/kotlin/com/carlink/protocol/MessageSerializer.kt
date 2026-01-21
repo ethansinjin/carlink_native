@@ -258,10 +258,10 @@ object MessageSerializer {
                 put("callQuality", config.callQuality) // 0=normal, 1=clear, 2=HD
                 put("WiFiChannel", 161) // 5GHz channel 161 (optimal low interference)
                 put("wifiChannel", 161) // Both keys for compatibility
-                put("wifiName", "carlink")
-                put("btName", "carlink")
-                put("boxName", "carlink")
-                put("OemName", "carlink")
+                put("wifiName", config.boxName)
+                put("btName", config.boxName)
+                put("boxName", config.boxName)
+                put("OemName", config.boxName)
                 put("autoConn", true) // Auto-connect when device detected
                 put("autoPlay", false) // Don't auto-play media on connection
             }

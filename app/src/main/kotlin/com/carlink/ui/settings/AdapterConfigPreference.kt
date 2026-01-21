@@ -482,6 +482,8 @@ class AdapterConfigPreference private constructor(
                 preferences.remove(KEY_MIC_SOURCE)
                 preferences.remove(KEY_WIFI_BAND)
                 preferences.remove(KEY_CALL_QUALITY)
+                preferences.remove(KEY_HAS_COMPLETED_FIRST_INIT)
+                preferences.remove(KEY_PENDING_CHANGES)
             }
             // Clear sync cache
             syncCache
@@ -493,8 +495,10 @@ class AdapterConfigPreference private constructor(
                     remove(SYNC_CACHE_KEY_MIC_SOURCE)
                     remove(SYNC_CACHE_KEY_WIFI_BAND)
                     remove(SYNC_CACHE_KEY_CALL_QUALITY)
+                    remove(SYNC_CACHE_KEY_HAS_COMPLETED_FIRST_INIT)
+                    remove(SYNC_CACHE_KEY_PENDING_CHANGES)
                 }.apply()
-            logInfo("Adapter config preferences reset to defaults (sync cache cleared)", tag = "AdapterConfig")
+            logInfo("Adapter config preferences reset to defaults (sync cache cleared, next session will run FULL init)", tag = "AdapterConfig")
         } catch (e: Exception) {
             logError("Failed to reset adapter config preferences: $e", tag = "AdapterConfig")
             throw e
