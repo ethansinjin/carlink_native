@@ -164,6 +164,19 @@ class CarlinkManager(
     private var currentMicAudioType = 3 // Siri/voice input
     private var micSendTimer: Timer? = null
 
+    /**
+     * Voice mode tracking for proper microphone lifecycle management.
+     *
+     * CRITICAL: CarPlay sends PHONECALL_START before SIRI_STOP when making calls via Siri.
+     * Without tracking, SIRI_STOP would kill the phone call's microphone.
+     *
+     * Observed sequence (from USB capture analysis):
+     *   217.13s: PHONECALL_START  → mic should stay active
+     *   217.26s: SIRI_STOP        → must NOT stop mic (phone call active)
+     */
+    private enum class VoiceMode { NONE, SIRI, PHONECALL }
+    private var activeVoiceMode = VoiceMode.NONE
+
     // MediaSession
     private var mediaSessionManager: MediaSessionManager? = null
 
@@ -542,6 +555,7 @@ class CarlinkManager(
         cancelReconnect() // Cancel any pending auto-reconnect
         currentPhoneType = null // Clear phone type on disconnect
         clearCachedMediaMetadata() // Clear stale metadata to prevent race conditions on reconnect
+        activeVoiceMode = VoiceMode.NONE // Reset voice mode on disconnect
         stopMicrophoneCapture()
 
         adapterDriver?.stop()
@@ -1156,23 +1170,36 @@ class CarlinkManager(
             }
 
             AudioCommand.AUDIO_SIRI_START -> {
-                logInfo("[AUDIO_CMD] Siri started - enabling microphone", tag = Logger.Tags.MIC)
+                logInfo("[AUDIO_CMD] Siri started - enabling microphone (mode: SIRI)", tag = Logger.Tags.MIC)
+                activeVoiceMode = VoiceMode.SIRI
                 startMicrophoneCapture(decodeType = 5, audioType = 3)
             }
 
             AudioCommand.AUDIO_PHONECALL_START -> {
-                logInfo("[AUDIO_CMD] Phone call started - enabling microphone", tag = Logger.Tags.MIC)
+                logInfo("[AUDIO_CMD] Phone call started - enabling microphone (mode: PHONECALL)", tag = Logger.Tags.MIC)
+                activeVoiceMode = VoiceMode.PHONECALL
                 startMicrophoneCapture(decodeType = 5, audioType = 3)
             }
 
             AudioCommand.AUDIO_SIRI_STOP -> {
-                logInfo("[AUDIO_CMD] Siri stopped - disabling microphone", tag = Logger.Tags.MIC)
-                stopMicrophoneCapture()
+                // CRITICAL: Don't stop mic if phone call is active (Siri-initiated call scenario)
+                // USB capture shows: PHONECALL_START arrives ~130ms BEFORE SIRI_STOP
+                if (activeVoiceMode == VoiceMode.PHONECALL) {
+                    logInfo(
+                        "[AUDIO_CMD] Siri stopped but phone call active - keeping microphone",
+                        tag = Logger.Tags.MIC,
+                    )
+                } else {
+                    logInfo("[AUDIO_CMD] Siri stopped - disabling microphone", tag = Logger.Tags.MIC)
+                    activeVoiceMode = VoiceMode.NONE
+                    stopMicrophoneCapture()
+                }
                 audioManager?.stopVoiceTrack()
             }
 
             AudioCommand.AUDIO_PHONECALL_STOP -> {
                 logInfo("[AUDIO_CMD] Phone call stopped - disabling microphone", tag = Logger.Tags.MIC)
+                activeVoiceMode = VoiceMode.NONE
                 stopMicrophoneCapture()
                 audioManager?.stopCallTrack()
             }

@@ -63,4 +63,7 @@
 [46] :: Static Analysis Tool code correction. Video Code changes according to Google H264 guidelines. Test session record
 [47] :: Session Record Function Testing and some Settings UI reorganization.
 [48] :: Turned off App Integrity in Play Console.
-[49} :: the reset to adapter defaults resetToDefaults() now clears/forces a full init on next launch. Added log events for control UI button uses. Also testing single boxName string for all labels
+[49]:: the reset to adapter defaults resetToDefaults() now clears/forces a full init on next launch. Added log events for control UI button uses. Also testing single boxName string for all labels
+[50] :: Premature Microphone release when Siri is used to start a call. Session managent will not attempt to keep microphone open when SIRI_STOP is received when a PHONECALL_START is also received.
+
+[51] :: Video; Skip Prepending When SPS Already Present, Add Diagnostic Logging for Corruption Analysis, Updated Incorrect Comment about once per session SPS+PPS. Its every frame, Increased Search Limit on IDR Frame check.

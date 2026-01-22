@@ -128,10 +128,15 @@ public class H264Renderer {
 
     // SPS/PPS caching for codec recovery after flush/reset AND continuous operation
     // H.264 decoders require SPS+PPS before any IDR frame can be decoded.
-    // The CPC200-CCPA adapter only sends SPS+PPS at session start, not on FRAME command.
+    //
+    // Note on adapter behavior (verified via USB capture analysis Jan 2026):
+    // - CPC200-CCPA adapter sends SPS+PPS with EVERY IDR frame (every 2 seconds)
+    // - Pi-carplay captures only have SPS+PPS at session start
+    //
     // We cache these NAL units and:
     //   1. Resubmit with BUFFER_FLAG_CODEC_CONFIG after flush() (async callback-based)
-    //   2. Prepend to every IDR frame to prevent decoder drift during continuous operation
+    //   2. Prepend to IDR frames ONLY if they don't already contain SPS+PPS
+    //      (detected by checking if first NAL type is 7/SPS)
     private final Object spsLock = new Object(); // Protects SPS/PPS access
     private byte[] cachedSps = null;
     private byte[] cachedPps = null;
@@ -1405,6 +1410,28 @@ public class H264Renderer {
                 return false;
             }
 
+            // Check if packet already contains SPS (starts with 00 00 00 01 67 or 00 00 01 67)
+            // If so, skip prepending to avoid duplicate SPS+PPS
+            // Note: CPC200-CCPA adapter sends SPS+PPS with EVERY IDR frame (not just at start)
+            // Pi-carplay captures only have SPS+PPS at session start and need injection
+            if (frameSize > 5) {
+                int firstNalType = -1;
+                if (frameData.get(0) == 0 && frameData.get(1) == 0) {
+                    if (frameData.get(2) == 1) {
+                        firstNalType = frameData.get(3) & 0x1F;
+                    } else if (frameData.get(2) == 0 && frameData.get(3) == 1) {
+                        firstNalType = frameData.get(4) & 0x1F;
+                    }
+                }
+                if (firstNalType == 7) {
+                    // Packet already has SPS - queue as-is without prepending
+                    if (totalFramesDecoded.get() % 100 == 0) {
+                        log("[IDR_INJECT] Packet already contains SPS - skipping prepend");
+                    }
+                    return false;  // Let caller queue without modification
+                }
+            }
+
             try {
                 int totalSize = cachedSps.length + cachedPps.length + frameSize;
                 if (frameData.capacity() < totalSize) {
@@ -1449,7 +1476,7 @@ public class H264Renderer {
     private boolean containsIdrFrame(ByteBuffer buffer, int dataSize) {
         if (dataSize < 5) return false;
 
-        int searchLimit = Math.min(dataSize, 64); // IDR NAL usually near start
+        int searchLimit = Math.min(dataSize, 512); // IDR NAL may follow SEI or other NAL units
         for (int i = 0; i < searchLimit - 4; i++) {
             if (buffer.get(i) == 0 && buffer.get(i + 1) == 0) {
                 int nalOffset = -1;

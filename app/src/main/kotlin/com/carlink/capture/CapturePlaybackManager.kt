@@ -29,12 +29,13 @@ class CapturePlaybackManager(
     companion object {
         private const val TAG = "PLAYBACK"
 
-        // Message types from protocol
-        private const val TYPE_VIDEO_DATA = 6
-        private const val TYPE_AUDIO_DATA = 7
-        private const val TYPE_PLUGGED = 5
-        private const val TYPE_COMMAND = 8
-        private const val TYPE_MEDIA_DATA = 9
+        // Message types from protocol (see MessageTypes.kt)
+        private const val TYPE_VIDEO_DATA = 0x06
+        private const val TYPE_AUDIO_DATA = 0x07
+        private const val TYPE_PLUGGED = 0x02
+        private const val TYPE_COMMAND = 0x08
+        private const val TYPE_MEDIA_DATA = 0x2A
+        private const val TYPE_NAVI_VIDEO_DATA = 0x2C // Navigation video (iOS 13+)
 
         // Minimum audio payload size (PCM frame = 4 bytes for stereo 16-bit)
         // Skip tiny packets that would corrupt the PCM stream alignment
@@ -257,6 +258,11 @@ class CapturePlaybackManager(
         when (type) {
             TYPE_VIDEO_DATA -> {
                 logDebug("[$TAG] Processing video type=$type (expected=$TYPE_VIDEO_DATA)", tag = TAG)
+                processVideoPacket(data)
+            }
+            TYPE_NAVI_VIDEO_DATA -> {
+                // Navigation video (iOS 13+) uses same structure as main video
+                logDebug("[$TAG] Processing nav video type=$type", tag = TAG)
                 processVideoPacket(data)
             }
             TYPE_AUDIO_DATA -> processAudioPacket(data)

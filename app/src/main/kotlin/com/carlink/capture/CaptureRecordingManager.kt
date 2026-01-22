@@ -252,15 +252,18 @@ class CaptureRecordingManager(
 
         try {
             val seq = sequenceNumber.getAndIncrement()
-            val offset = currentOffset.get()
             val length = data.size
             val timestamp = System.currentTimeMillis() - sessionStartTime
             val typeName = MessageType.fromId(type).name
 
             // Write binary data (synchronized for thread safety)
+            // CRITICAL: Capture offset INSIDE sync block to prevent race condition
+            // between concurrent IN (read thread) and OUT (write thread) packets.
+            // The offset must match the actual stream position when write occurs.
+            val offset: Long
             synchronized(stream) {
+                offset = currentOffset.getAndAdd(length.toLong())
                 stream.write(data)
-                currentOffset.addAndGet(length.toLong())
             }
 
             // Add packet metadata

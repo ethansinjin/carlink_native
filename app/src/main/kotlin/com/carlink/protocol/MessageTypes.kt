@@ -14,6 +14,45 @@ const val PROTOCOL_MAGIC: Int = 0x55aa55aa
 const val HEADER_SIZE: Int = 16
 
 /**
+ * USB Communication Encryption Key for SESSION_TOKEN (0xA3) decryption.
+ *
+ * The SESSION_TOKEN message contains Base64-encoded, AES-128-CBC encrypted
+ * telemetry data sent from the adapter during session establishment.
+ *
+ * Decryption details:
+ * - Algorithm: AES-128-CBC
+ * - Key: "W2EC1X1NbZ58TXtn" (16 bytes, ASCII)
+ * - IV: First 16 bytes of Base64-decoded payload
+ * - Ciphertext: Remaining bytes after IV
+ * - Content: JSON with phone/box telemetry
+ *
+ * Decrypted JSON structure:
+ * ```json
+ * {
+ *   "phone": {
+ *     "model": "iPhone18,4",      // Device model
+ *     "osVer": "23D5103d",        // OS build version
+ *     "linkT": "CarPlay",         // Link type (CarPlay, AndroidAuto)
+ *     "conSpd": 4,                // Connection speed indicator
+ *     "conRate": 0.24,            // Historical success rate
+ *     "conNum": 17,               // Total connection attempts
+ *     "success": 4                // Successful connections
+ *   },
+ *   "box": {
+ *     "uuid": "651ede98...",      // Adapter unique ID
+ *     "model": "A15W",            // Adapter model
+ *     "hw": "YMA0-WR2C-0003",     // Hardware revision
+ *     "ver": "2025.10.15.1127",   // Firmware version
+ *     "mfd": "20240119"           // Manufacturing date (YYYYMMDD)
+ *   }
+ * }
+ * ```
+ *
+ * Reference: documents/reference/firmware/RE_Documention/02_Protocol_Reference/usb_protocol.md
+ */
+const val SESSION_TOKEN_ENCRYPTION_KEY: String = "W2EC1X1NbZ58TXtn"
+
+/**
  * Command mappings for CPC200-CCPA protocol.
  * Used for sending control commands to the adapter.
  */
@@ -71,38 +110,80 @@ enum class CommandMapping(
 
 /**
  * Message type identifiers for CPC200-CCPA protocol.
+ *
+ * Reference: documents/reference/firmware/RE_Documention/02_Protocol_Reference/usb_protocol.md
  */
 enum class MessageType(
     val id: Int,
 ) {
+    // Session Management
     OPEN(0x01),
     PLUGGED(0x02),
     PHASE(0x03),
     UNPLUGGED(0x04),
+    DISCONNECT_PHONE(0x0F),
+    CLOSE_DONGLE(0x15),
+    HEARTBEAT(0xAA),
+
+    // Data Streams
     TOUCH(0x05),
     VIDEO_DATA(0x06),
     AUDIO_DATA(0x07),
+    MULTI_TOUCH(0x17),
+    NAVI_VIDEO_DATA(0x2C), // Navigation video (iOS 13+), same structure as VIDEO_DATA
+
+    // Control Commands
     COMMAND(0x08),
     LOGO_TYPE(0x09),
-    DISCONNECT_PHONE(0x0F),
-    CLOSE_ADAPTR(0x15),
+
+    // Device Information
     BLUETOOTH_ADDRESS(0x0A),
     BLUETOOTH_PIN(0x0C),
     BLUETOOTH_DEVICE_NAME(0x0D),
     WIFI_DEVICE_NAME(0x0E),
     BLUETOOTH_PAIRED_LIST(0x12),
     MANUFACTURER_INFO(0x14),
-    MULTI_TOUCH(0x17),
-    HI_CAR_LINK(0x18),
-    BOX_SETTINGS(0x19),
-    NETWORK_MAC_ADDRESS(0x23),
-    NETWORK_MAC_ADDRESS_ALT(0x24),
-    MEDIA_DATA(0x2A),
-    SEND_FILE(0x99),
-    HEARTBEAT(0xAA),
     SOFTWARE_VERSION(0xCC),
+    STATUS_VALUE(0xBB), // Status/config value
+
+    // Configuration
+    BOX_SETTINGS(0x19),
+    SEND_FILE(0x99),
+
+    // Peer Device Info
+    HI_CAR_LINK(0x18),
+    PEER_BLUETOOTH_ADDRESS(0x23),
+    PEER_BLUETOOTH_ADDRESS_ALT(0x24),
+    UI_HIDE_PEER_INFO(0x25),
+    UI_BRING_TO_FOREGROUND(0x26),
+
+    // Media Metadata
+    MEDIA_DATA(0x2A),
+
+    // Session Establishment
+    SESSION_TOKEN(0xA3), // Encrypted session telemetry (AES-128-CBC)
+
+    // Navigation Focus (iOS 13+)
+    NAVI_FOCUS_REQUEST(0x6E), // Nav requesting focus (IN)
+    NAVI_FOCUS_RELEASE(0x6F), // Nav released focus (IN)
+
+    // Newly Identified (Firmware Binary Analysis - Jan 2026)
+    REMOTE_CX_CY(0x1E), // Display resolution broadcast from adapter
+    EXTENDED_MFG_INFO(0xA1), // Extended OEM/manufacturer data
+    REMOTE_DISPLAY(0xF0), // Remote display parameters
+
     UNKNOWN(-1),
     ;
+
+    // Legacy aliases for backwards compatibility
+    @Deprecated("Use PEER_BLUETOOTH_ADDRESS", ReplaceWith("PEER_BLUETOOTH_ADDRESS"))
+    val NETWORK_MAC_ADDRESS get() = PEER_BLUETOOTH_ADDRESS
+
+    @Deprecated("Use PEER_BLUETOOTH_ADDRESS_ALT", ReplaceWith("PEER_BLUETOOTH_ADDRESS_ALT"))
+    val NETWORK_MAC_ADDRESS_ALT get() = PEER_BLUETOOTH_ADDRESS_ALT
+
+    @Deprecated("Use CLOSE_DONGLE", ReplaceWith("CLOSE_DONGLE"))
+    val CLOSE_ADAPTR get() = CLOSE_DONGLE
 
     companion object {
         private val idMap = entries.associateBy { it.id }
@@ -171,15 +252,20 @@ enum class FileAddress(
 
 /**
  * Phone type identifiers for connected devices.
+ *
+ * Reference: documents/reference/firmware/RE_Documention/02_Protocol_Reference/usb_protocol.md
  */
 enum class PhoneType(
     val id: Int,
 ) {
     ANDROID_MIRROR(1),
+    CARLIFE(2),
     CARPLAY(3),
     IPHONE_MIRROR(4),
     ANDROID_AUTO(5),
     HI_CAR(6),
+    ICCOA(7),
+    CARPLAY_WIRELESS(8),
     UNKNOWN(-1),
     ;
 
