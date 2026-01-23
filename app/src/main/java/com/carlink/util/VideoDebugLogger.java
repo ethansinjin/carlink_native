@@ -355,5 +355,148 @@ public class VideoDebugLogger {
         codecOutputCount = 0;
         // Also reset NAL counters
         resetNalCounters();
+        // Reset stall detection
+        lastInputQueueTime = 0;
+        lastOutputTime = 0;
+        stallWarningCount = 0;
+    }
+
+    // ==================== External Issue Detection ====================
+    // These diagnostics help identify OS/driver issues vs app code issues
+
+    private static long lastInputQueueTime = 0;
+    private static long lastOutputTime = 0;
+    private static long stallWarningCount = 0;
+    private static final long STALL_THRESHOLD_MS = 500; // No output for 500ms = potential stall
+
+    /**
+     * Log SPS NAL unit header bytes for integrity verification.
+     * Valid SPS starts with: 0x00 0x00 0x00 0x01 0x67 (or 0x00 0x00 0x01 0x67)
+     * If first bytes don't match this pattern, data may be corrupted.
+     *
+     * Note: Corruption detection (ERROR) always logs; valid integrity (INFO) requires debugEnabled.
+     */
+    public static void logSpsPpsIntegrity(byte[] sps, byte[] pps) {
+        if (sps == null || pps == null) return;
+        if (!debugEnabled) {
+            // Even if debug is disabled, check for corruption and log errors
+            boolean validSps = isValidSpsHeader(sps);
+            if (!validSps) {
+                Log.e(TAG, "[VIDEO_DIAG] *** INVALID SPS HEADER - POSSIBLE DATA CORRUPTION ***");
+            }
+            return;
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("[VIDEO_DIAG] SPS/PPS integrity check - SPS[");
+        sb.append(sps.length).append("]: ");
+        for (int i = 0; i < Math.min(8, sps.length); i++) {
+            sb.append(String.format("%02X ", sps[i] & 0xFF));
+        }
+        sb.append("| PPS[").append(pps.length).append("]: ");
+        for (int i = 0; i < Math.min(8, pps.length); i++) {
+            sb.append(String.format("%02X ", pps[i] & 0xFF));
+        }
+
+        boolean validSps = isValidSpsHeader(sps);
+
+        if (!validSps) {
+            sb.append(" *** INVALID SPS HEADER - POSSIBLE CORRUPTION ***");
+            Log.e(TAG, sb.toString());
+        } else {
+            Log.i(TAG, sb.toString());
+        }
+    }
+
+    /** Helper to validate SPS header format. */
+    private static boolean isValidSpsHeader(byte[] sps) {
+        if (sps == null || sps.length < 5) return false;
+        // Check for 4-byte start code: 00 00 00 01 67
+        if (sps[0] == 0 && sps[1] == 0 && sps[2] == 0 && sps[3] == 1 && (sps[4] & 0x1F) == 7) {
+            return true;
+        }
+        // Check for 3-byte start code: 00 00 01 67
+        if (sps[0] == 0 && sps[1] == 0 && sps[2] == 1 && (sps[3] & 0x1F) == 7) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Track decoder input/output timing to detect stalls.
+     * Call when input is queued to codec.
+     *
+     * Note: Timing is always tracked; warnings only log when debugEnabled OR stall detected.
+     */
+    public static void logCodecInputTiming() {
+        lastInputQueueTime = System.currentTimeMillis();
+
+        // Check for potential stall (input queued but no output for too long)
+        // Always log stalls even if debug disabled - they indicate serious issues
+        if (lastOutputTime > 0 && lastInputQueueTime - lastOutputTime > STALL_THRESHOLD_MS) {
+            stallWarningCount++;
+            Log.w(TAG, "[VIDEO_DIAG] Decoder stall detected: " +
+                    (lastInputQueueTime - lastOutputTime) + "ms since last output " +
+                    "(stall count: " + stallWarningCount + ") - possible driver issue");
+        }
+    }
+
+    /**
+     * Track decoder output timing.
+     * Call when output buffer is received.
+     *
+     * Note: Timing is always tracked; high latency warnings only log when debugEnabled.
+     */
+    public static void logCodecOutputTiming() {
+        long now = System.currentTimeMillis();
+        long inputToOutputMs = (lastInputQueueTime > 0) ? (now - lastInputQueueTime) : -1;
+        lastOutputTime = now;
+
+        // Log unusually high decode latency (potential driver issue)
+        // Only log if debug enabled to avoid spam in production
+        if (debugEnabled && inputToOutputMs > 100) {  // > 100ms is unusual for hardware decoder
+            Log.w(TAG, "[VIDEO_DIAG] High decode latency: " + inputToOutputMs +
+                    "ms - possible driver/thermal throttling");
+        }
+    }
+
+    /**
+     * Log when decoder is being recreated (Intel VPU workaround).
+     * This helps correlate corruption with reset events.
+     *
+     * Note: Always logs (WARN level) - important for diagnosing Intel-specific issues.
+     */
+    public static void logIntelVpuWorkaround(String reason) {
+        Log.w(TAG, "[VIDEO_DIAG] Intel VPU workaround triggered: " + reason +
+                " | NAL stats: " + getNalStatsSummary());
+    }
+
+    /**
+     * Log output buffer anomalies (zero-size, invalid flags, etc.)
+     *
+     * Note: Only logs when debugEnabled - anomalies can occur during normal operation.
+     */
+    public static void logOutputBufferAnomaly(int size, int flags, long presentationTimeUs) {
+        if (!debugEnabled) return;
+
+        if (size == 0 && (flags & 4) == 0) {  // 4 = BUFFER_FLAG_END_OF_STREAM
+            Log.w(TAG, "[VIDEO_DIAG] Zero-size output buffer (not EOS) - flags=" + flags +
+                    ", pts=" + presentationTimeUs + " - possible driver issue");
+        }
+        if (presentationTimeUs < 0) {
+            Log.w(TAG, "[VIDEO_DIAG] Negative PTS in output: " + presentationTimeUs +
+                    " - possible driver issue");
+        }
+    }
+
+    /**
+     * Get diagnostic summary for external issue detection.
+     */
+    public static String getDiagnosticSummary() {
+        long timeSinceOutput = (lastOutputTime > 0) ?
+                (System.currentTimeMillis() - lastOutputTime) : -1;
+        return String.format(Locale.US,
+                "StallCount:%d, LastOutput:%dms ago, %s",
+                stallWarningCount, timeSinceOutput, getNalStatsSummary());
     }
 }

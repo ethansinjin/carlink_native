@@ -111,6 +111,9 @@ fun LogPreset.apply() {
             Logger.setLogLevel(Logger.LogLevel.ERROR, true)
             Logger.enableAllTags()
             Logger.setTagsEnabled(listOf(Logger.Tags.VIDEO, Logger.Tags.AUDIO, Logger.Tags.USB_RAW), false)
+            // Enable VideoDebugLogger for full diagnostics (Intel VPU, SPS/PPS integrity, stall detection)
+            Logger.setDebugLoggingEnabled(true)
+            com.carlink.util.VideoDebugLogger.setDebugEnabled(true)
         }
 
         LogPreset.PERFORMANCE -> {

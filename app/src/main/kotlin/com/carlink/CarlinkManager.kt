@@ -326,13 +326,14 @@ class CarlinkManager(
             tag = Logger.Tags.AUDIO,
         )
         logInfo(
-            "[PLATFORM] Using VideoDecoder: ${platformInfo.hardwareH264DecoderName ?: "generic (createDecoderByType)"}",
+            "[PLATFORM] Using VideoDecoder: ${platformInfo.hardwareH264DecoderName ?: "generic (createDecoderByType)"}" +
+                if (platformInfo.requiresIntelMediaCodecFixes()) " [Intel VPU workaround enabled]" else "",
             tag = Logger.Tags.VIDEO,
         )
 
         // Initialize H264 renderer with Surface for direct HWC rendering
         // Surface comes from SurfaceView - no GPU composition overhead
-        // Pass platform-detected codec name for optimal hardware decoder selection
+        // Pass platform-detected codec name and Intel VPU workaround flag
         h264Renderer =
             H264Renderer(
                 context,
@@ -342,6 +343,7 @@ class CarlinkManager(
                 logCallback,
                 executors,
                 platformInfo.hardwareH264DecoderName,
+                platformInfo.requiresIntelMediaCodecFixes(),
             )
 
         // Set keyframe callback - after codec reset, we need to request a new IDR frame

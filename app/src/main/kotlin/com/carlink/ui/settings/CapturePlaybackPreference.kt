@@ -3,6 +3,7 @@ package com.carlink.ui.settings
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import androidx.core.net.toUri
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -68,12 +69,12 @@ class CapturePlaybackPreference private constructor(
 
     val captureJsonUriFlow: Flow<Uri?> =
         context.capturePlaybackDataStore.data.map { prefs ->
-            prefs[KEY_CAPTURE_JSON_URI]?.let { Uri.parse(it) }
+            prefs[KEY_CAPTURE_JSON_URI]?.let { it.toUri() }
         }
 
     val captureBinUriFlow: Flow<Uri?> =
         context.capturePlaybackDataStore.data.map { prefs ->
-            prefs[KEY_CAPTURE_BIN_URI]?.let { Uri.parse(it) }
+            prefs[KEY_CAPTURE_BIN_URI]?.let { it.toUri() }
         }
 
     suspend fun setPlaybackEnabled(enabled: Boolean) {
@@ -117,12 +118,12 @@ class CapturePlaybackPreference private constructor(
 
     fun getCaptureJsonUriSync(): Uri? =
         runBlocking {
-            context.capturePlaybackDataStore.data.first()[KEY_CAPTURE_JSON_URI]?.let { Uri.parse(it) }
+            context.capturePlaybackDataStore.data.first()[KEY_CAPTURE_JSON_URI]?.let { it.toUri() }
         }
 
     fun getCaptureBinUriSync(): Uri? =
         runBlocking {
-            context.capturePlaybackDataStore.data.first()[KEY_CAPTURE_BIN_URI]?.let { Uri.parse(it) }
+            context.capturePlaybackDataStore.data.first()[KEY_CAPTURE_BIN_URI]?.let { it.toUri() }
         }
 
     /**

@@ -149,6 +149,11 @@ public class H264Renderer {
     private HandlerThread codecCallbackThread;
     private Handler codecCallbackHandler;
 
+    // Intel VPU workaround: Intel decoders don't properly reset reference frames on flush()
+    // Requires full stop/release/recreate instead of flush+start for reliable recovery
+    // Set from PlatformDetector.requiresIntelMediaCodecFixes() via constructor
+    private final boolean requiresIntelVpuWorkaround;
+
     private int calculateOptimalBufferSize(int width, int height) {
         int pixels = width * height;
         if (pixels <= 1920 * 1080) return 8 * 1024 * 1024;
@@ -177,13 +182,28 @@ public class H264Renderer {
         return Math.max(baseSize, 1024 * 1024);
     }
 
-    public H264Renderer(Context context, int width, int height, Surface surface, LogCallback logCallback, AppExecutors executors, String preferredDecoderName) {
+    /**
+     * @param context Android context
+     * @param width Video width
+     * @param height Video height
+     * @param surface Render target surface
+     * @param logCallback Logging callback
+     * @param executors Thread pool executors
+     * @param preferredDecoderName Preferred decoder name from PlatformDetector (e.g., "OMX.Intel.hw_vd.h264")
+     * @param requiresIntelVpuWorkaround True if Intel VPU workaround needed (from PlatformDetector.requiresIntelMediaCodecFixes())
+     */
+    public H264Renderer(Context context, int width, int height, Surface surface, LogCallback logCallback, AppExecutors executors, String preferredDecoderName, boolean requiresIntelVpuWorkaround) {
         this.width = width;
         this.height = height;
         this.surface = surface;
         this.logCallback = logCallback;
         this.executors = executors;
         this.preferredDecoderName = preferredDecoderName;
+        this.requiresIntelVpuWorkaround = requiresIntelVpuWorkaround;
+
+        if (requiresIntelVpuWorkaround) {
+            log("[INTEL_VPU] Intel VPU workaround enabled - will use full codec recreation on reset");
+        }
 
         int bufferSize = calculateOptimalBufferSize(width, height);
         ringBuffer = new PacketRingByteBuffer(bufferSize);
@@ -441,38 +461,69 @@ public class H264Renderer {
             resetTimestamp = System.currentTimeMillis();
             pendingKeyframeRequest = true;
 
-            // flush() + start() required in async mode to resume callbacks
-            if (mCodec != null) {
-                try {
-                    mCodec.flush();
-                    mCodec.start();
-                    codecStartTime = System.currentTimeMillis();
-                    log("[RESET] Codec flush+start completed");
-                    VideoDebugLogger.logCodecStarted();
+            // Clear SPS/PPS cache to ensure fresh config from next IDR
+            // This prevents re-injecting potentially corrupted cached config
+            clearSpsPpsCache();
 
-                    // Request SPS+PPS injection on next available buffer (async-safe)
-                    requestCodecConfigInjection();
-                } catch (Exception e) {
-                    log("[RESET] flush+start failed: " + e + " - recreating codec");
+            if (mCodec != null) {
+                // Intel VPU workaround: flush() doesn't properly clear reference frames,
+                // causing P-frame corruption that persists until full codec recreation.
+                // See: https://github.com/intel/libyami/issues/837 (VP9 artifacts on Apollo Lake)
+                // Force full stop/release/recreate instead of flush+start for Intel decoders.
+                if (requiresIntelVpuWorkaround) {
+                    log("[RESET] Intel VPU - forcing full codec recreation");
+                    VideoDebugLogger.logIntelVpuWorkaround("reset() called - flush() unreliable on Intel VPU");
                     try {
                         mCodec.stop();
                         mCodec.release();
                         mCodec = null;
-                    } catch (Exception e2) {
-                        log("[RESET] Cleanup failed: " + e2);
+                    } catch (Exception e) {
+                        log("[RESET] Intel cleanup failed: " + e);
                         mCodec = null;
                     }
                     try {
                         initCodec(width, height, surface);
                         mCodec.start();
                         codecStartTime = System.currentTimeMillis();
-                        log("[RESET] Codec recreated");
+                        log("[RESET] Intel codec recreated successfully");
+                        VideoDebugLogger.logCodecStarted();
+                        // No requestCodecConfigInjection() - let fresh SPS/PPS come from adapter
+                    } catch (Exception e) {
+                        log("[RESET] Intel codec recreation failed: " + e);
+                    }
+                } else {
+                    // Non-Intel: use standard flush+start (works correctly on Pi, AuCar, etc.)
+                    try {
+                        mCodec.flush();
+                        mCodec.start();
+                        codecStartTime = System.currentTimeMillis();
+                        log("[RESET] Codec flush+start completed");
                         VideoDebugLogger.logCodecStarted();
 
                         // Request SPS+PPS injection on next available buffer (async-safe)
                         requestCodecConfigInjection();
-                    } catch (Exception e3) {
-                        log("[RESET] Codec creation failed: " + e3);
+                    } catch (Exception e) {
+                        log("[RESET] flush+start failed: " + e + " - recreating codec");
+                        try {
+                            mCodec.stop();
+                            mCodec.release();
+                            mCodec = null;
+                        } catch (Exception e2) {
+                            log("[RESET] Cleanup failed: " + e2);
+                            mCodec = null;
+                        }
+                        try {
+                            initCodec(width, height, surface);
+                            mCodec.start();
+                            codecStartTime = System.currentTimeMillis();
+                            log("[RESET] Codec recreated");
+                            VideoDebugLogger.logCodecStarted();
+
+                            // Request SPS+PPS injection on next available buffer (async-safe)
+                            requestCodecConfigInjection();
+                        } catch (Exception e3) {
+                            log("[RESET] Codec creation failed: " + e3);
+                        }
                     }
                 }
             } else {
@@ -880,11 +931,13 @@ public class H264Renderer {
                             if (isIdrFrame && queueIdrWithSpsPps(codec, index, byteBuffer, dataSize, pts)) {
                                 // Successfully queued IDR with SPS/PPS prepended
                                 VideoDebugLogger.logCodecInputQueued(index, dataSize);
+                                VideoDebugLogger.logCodecInputTiming(); // Track for stall detection
                                 framesReceivedSinceReset++;
                             } else {
                                 // Normal frame or IDR injection failed - queue as-is
                                 mCodec.queueInputBuffer(index, 0, dataSize, pts, 0);
                                 VideoDebugLogger.logCodecInputQueued(index, dataSize);
+                                VideoDebugLogger.logCodecInputTiming(); // Track for stall detection
                                 framesReceivedSinceReset++;
                             }
 
@@ -928,6 +981,12 @@ public class H264Renderer {
                     if (codec != mCodec || mCodec == null || !running) {
                         return;
                     }
+
+                    // Track output timing for stall detection (external issue diagnosis)
+                    VideoDebugLogger.logCodecOutputTiming();
+
+                    // Check for output buffer anomalies (potential driver issues)
+                    VideoDebugLogger.logOutputBufferAnomaly(info.size, info.flags, info.presentationTimeUs);
 
                     if (info.size > 0) {
                         long decodedCount = totalFramesDecoded.incrementAndGet();
@@ -1290,6 +1349,9 @@ public class H264Renderer {
 
                 if (cachedSps != null && cachedPps != null) {
                     log("[CODEC_CONFIG] SPS+PPS cached successfully - will prepend to IDR frames");
+                    // Log SPS/PPS header bytes for integrity verification
+                    // If these don't match expected pattern, data corruption occurred upstream
+                    VideoDebugLogger.logSpsPpsIntegrity(cachedSps, cachedPps);
                 }
             } catch (Exception e) {
                 log("[CODEC_CONFIG] Error caching SPS/PPS: " + e.getMessage());

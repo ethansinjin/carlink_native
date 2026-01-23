@@ -67,3 +67,4 @@
 [50] :: Premature Microphone release when Siri is used to start a call. Session managent will not attempt to keep microphone open when SIRI_STOP is received when a PHONECALL_START is also received.
 
 [51] :: Video; Skip Prepending When SPS Already Present, Add Diagnostic Logging for Corruption Analysis, Updated Incorrect Comment about once per session SPS+PPS. Its every frame, Increased Search Limit on IDR Frame check.
+[52] :: Some more Video tweaks. If Intel platform will attempt FULL flush, destroy, recreate of codec. Video issues might be faulty General Motor + Intel Software Design on gminfo3.7 - 3.8 hardware.

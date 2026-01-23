@@ -2,6 +2,7 @@ package com.carlink.ui.settings
 
 import android.net.Uri
 import android.widget.Toast
+import androidx.core.net.toUri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -128,7 +129,7 @@ fun CapturePlaybackContent(
                 val jsonUriString = uri.toString()
                 if (jsonUriString.endsWith(".json")) {
                     val binUriString = jsonUriString.replace(".json", ".bin")
-                    val binUri = Uri.parse(binUriString)
+                    val binUri = binUriString.toUri()
 
                     // Check if bin file exists and is accessible
                     try {
