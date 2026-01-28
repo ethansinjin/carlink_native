@@ -272,16 +272,16 @@ object MessageSerializer {
 
     /**
      * Generate AirPlay configuration string.
-     * Note: 'name' must be "AutoBox" (hardcoded) for CarPlay UI to display correctly.
-     * The custom display name goes in 'oemIconLabel' only.
+     * Matches Pi-Carplay SendIconConfig exactly:
+     * - All fields hardcoded except oemIconLabel
+     * - oemIconLabel only included if non-empty
+     * - Uses explicit \n (not raw multiline string)
      */
-    fun generateAirplayConfig(config: AdapterConfig): String =
-        """oemIconVisible = ${if (config.oemIconVisible) "1" else "0"}
-name = AutoBox
-model = Magic-Car-Link-1.00
-oemIconPath = /etc/oem_icon.png
-oemIconLabel = ${config.boxName}
-"""
+    fun generateAirplayConfig(config: AdapterConfig): String {
+        val label = config.boxName.trim()
+        val oemIconLabelLine = if (label.isNotEmpty()) "\noemIconLabel = $label" else ""
+        return "oemIconVisible = 1\nname = AutoBox\nmodel = Magic-Car-Link-1.00\noemIconPath = /etc/oem_icon.png$oemIconLabelLine\n"
+    }
 
     // ==================== Initialization Sequence ====================
 

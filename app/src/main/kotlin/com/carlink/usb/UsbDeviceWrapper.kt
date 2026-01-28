@@ -11,6 +11,8 @@ import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import androidx.core.content.ContextCompat
+import com.carlink.logging.Logger
+import com.carlink.logging.logDebug
 import com.carlink.protocol.KnownDevices
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
@@ -356,13 +358,15 @@ class UsbDeviceWrapper(
      */
     interface VideoDataProcessor {
         /**
-         * Process video data directly from USB.
+         * Process video data directly from USB with source presentation timestamp.
          *
          * @param payloadLength Total payload length (including 20-byte video header)
+         * @param sourcePtsMs Source presentation timestamp in milliseconds from video header
          * @param readCallback Callback to read data into the provided buffer
          */
         fun processVideoDirect(
             payloadLength: Int,
+            sourcePtsMs: Int,
             readCallback: (buffer: ByteArray, offset: Int, length: Int) -> Int,
         )
     }
@@ -422,6 +426,11 @@ class UsbDeviceWrapper(
         }
 
         Thread {
+            // Elevate thread priority: USB read feeds BOTH audio and video pipelines
+            // Must be >= video codec priority to prevent audio underruns from data starvation
+            // Using -10 (between URGENT_DISPLAY=-8 and AUDIO=-16) to match MediaCodec_loop priority
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY - 2)
+
             // Use class member recording callback
             val activeRecordingCallback = this.recordingCallback
             log("Reading loop started" + if (activeRecordingCallback != null) " (recording enabled)" else "")
@@ -510,36 +519,71 @@ class UsbDeviceWrapper(
                                     }
 
                                     // Step 3: Now process for video rendering (copy to ring buffer)
+                                    // Extract source PTS from video header (offset 12, little-endian int)
                                     if (totalRead == header.length) {
-                                        videoProcessor.processVideoDirect(header.length) { buffer, offset, _ ->
+                                        val sourcePts = extractPtsFromHeader(rawCaptureBuffer!!)
+                                        videoProcessor.processVideoDirect(header.length, sourcePts) { buffer, offset, _ ->
                                             // Copy from raw capture buffer to ring buffer
                                             System.arraycopy(rawCaptureBuffer!!, 0, buffer, offset, totalRead)
                                             totalRead
                                         }
                                     }
                                 } else {
-                                    // NO RECORDING: Use zero-copy direct read into ring buffer
-                                    videoProcessor.processVideoDirect(header.length) { buffer, offset, length ->
-                                        var totalRead = 0
-                                        while (totalRead < length && _isReadingLoopActive.get()) {
-                                            val remaining = length - totalRead
-                                            val chunkSize = minOf(remaining, 16384)
-                                            val chunkRead = conn.bulkTransfer(
-                                                endpoint,
-                                                buffer,
-                                                offset + totalRead,
-                                                chunkSize,
-                                                timeout,
+                                    // NO RECORDING: Read all video data, extract PTS, then process
+                                    // This approach is more reliable than partial reads
+                                    val videoBuffer = ByteArray(header.length)
+                                    var totalRead = 0
+                                    var readAttempts = 0
+                                    var lastChunkResult = 0
+
+                                    while (totalRead < header.length && _isReadingLoopActive.get()) {
+                                        val remaining = header.length - totalRead
+                                        val chunkSize = minOf(remaining, 16384)
+                                        readAttempts++
+                                        val chunkRead = conn.bulkTransfer(
+                                            endpoint,
+                                            videoBuffer,
+                                            totalRead,
+                                            chunkSize,
+                                            timeout,
+                                        )
+                                        lastChunkResult = chunkRead
+                                        if (chunkRead > 0) {
+                                            totalRead += chunkRead
+                                            bytesReceived += chunkRead
+                                            receiveCount++
+                                        } else if (chunkRead <= 0) {
+                                            // Log the failure for debugging (uses VIDEO_USB tag, respects user debug settings)
+                                            logDebug(
+                                                "[VIDEO_READ] Read failed: attempts=$readAttempts, got=$totalRead/${header.length}, lastResult=$chunkRead",
+                                                tag = Logger.Tags.VIDEO_USB
                                             )
-                                            if (chunkRead > 0) {
-                                                totalRead += chunkRead
-                                                bytesReceived += chunkRead
-                                                receiveCount++
-                                            } else if (chunkRead <= 0) {
-                                                break
-                                            }
+                                            break
                                         }
-                                        totalRead
+                                    }
+
+                                    // Extract source PTS from video header (offset 12) if we have enough data
+                                    val sourcePts = if (totalRead >= 16) {
+                                        extractPtsFromHeader(videoBuffer)
+                                    } else {
+                                        logDebug(
+                                            "[VIDEO_READ] Incomplete read for PTS: got=$totalRead bytes, need>=16",
+                                            tag = Logger.Tags.VIDEO_USB
+                                        )
+                                        0 // Fallback PTS
+                                    }
+
+                                    // Process video if we got data (don't skip even on partial read)
+                                    if (totalRead > 0) {
+                                        videoProcessor.processVideoDirect(header.length, sourcePts) { buffer, offset, _ ->
+                                            System.arraycopy(videoBuffer, 0, buffer, offset, totalRead)
+                                            totalRead
+                                        }
+                                    } else {
+                                        logDebug(
+                                            "[VIDEO_READ] No data read - frame skipped: attempts=$readAttempts, lastResult=$lastChunkResult",
+                                            tag = Logger.Tags.VIDEO_USB
+                                        )
                                     }
                                 }
 
@@ -692,6 +736,18 @@ class UsbDeviceWrapper(
         ): UsbDeviceWrapper? {
             val device = findDevices(usbManager).firstOrNull() ?: return null
             return UsbDeviceWrapper(context, usbManager, device, logCallback)
+        }
+
+        /**
+         * Extract source PTS from video header buffer.
+         * PTS is at offset 12 in the 20-byte video header, little-endian int.
+         */
+        fun extractPtsFromHeader(buffer: ByteArray, offset: Int = 0): Int {
+            if (buffer.size < offset + 16) return 0
+            return (buffer[offset + 12].toInt() and 0xFF) or
+                ((buffer[offset + 13].toInt() and 0xFF) shl 8) or
+                ((buffer[offset + 14].toInt() and 0xFF) shl 16) or
+                ((buffer[offset + 15].toInt() and 0xFF) shl 24)
         }
     }
 }

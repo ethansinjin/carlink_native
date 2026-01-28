@@ -3,7 +3,7 @@
 **Device:** GM Info 3.7 (gminfo37)
 **Platform:** Intel Apollo Lake (Broxton)
 **Android Version:** 12 (API 32)
-**Research Date:** December 7, 2025
+**Research Date:** December 2025 - January 2026
 
 ---
 
@@ -15,6 +15,9 @@
 | [audio_codecs.md](audio_codecs.md) | Audio codec specifications (AAC, MP3, Opus, etc.) |
 | [audio_effects.md](audio_effects.md) | Audio effects (Harman preprocessing, NXP bundle) |
 | [automotive_audio.md](automotive_audio.md) | AAOS multi-zone architecture, policies, focus |
+| **[carplay_audio_pipeline.md](carplay_audio_pipeline.md)** | **CarPlay/AirPlay bidirectional audio processing (CINEMO framework)** |
+| **[../intel_audio/README.md](../intel_audio/README.md)** | **Intel IAS SmartX + SST audio architecture (no official docs)** |
+| [../projection_comparison.md](../projection_comparison.md) | CarPlay vs Android Auto audio/video comparison |
 
 ---
 
@@ -96,6 +99,19 @@
 
 ## CarPlay/Android Auto Audio Configuration
 
+### Key Difference
+
+| Aspect | CarPlay | Android Auto |
+|--------|---------|--------------|
+| Framework | CINEMO/NME (Harman) | Standard AOSP |
+| Audio Library | libNmeAudioAAC.so | MediaCodec |
+| Telephony Tuning | Dedicated SCD files | Standard BT HFP |
+| Protocol | AirPlay | AAP |
+
+Both share the same AudioFlinger bus routing and Harman preprocessing.
+
+See [../projection_comparison.md](../projection_comparison.md) for detailed comparison.
+
 ### Recommended Settings
 
 ```
@@ -144,11 +160,22 @@ init.svc.vehicleaudiocontrol=running
 
 ## Data Sources
 
-All specifications obtained via ADB from connected device:
+All specifications obtained from GM AAOS research data:
+
+**ADB Enumeration (`/analysis/adb_Y181/`):**
 - `dumpsys media.audio_flinger`
 - `dumpsys media.audio_policy`
 - `dumpsys audio`
 - `dumpsys media.player` (audio codecs)
+
+**Extracted Partitions (`/extracted_partitions/`):**
 - `/vendor/etc/audio_policy_configuration.xml`
 - `/vendor/etc/audio_effects.xml`
-- System properties (`getprop`)
+- `/vendor/etc/scd/*.scd` - CarPlay telephony configurations
+- `/system/lib64/libNmeAudio*.so` - NME audio libraries (binary analysis)
+- `/system/lib64/libNmeCarPlay.so` - CarPlay audio integration
+
+**Binary Analysis:**
+- `strings`, `readelf`, `nm` on NME libraries
+
+**Source:** `/Users/zeno/Downloads/misc/GM_research/gm_aaos/`

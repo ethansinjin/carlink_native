@@ -1085,8 +1085,9 @@ class CarlinkManager(
                 }
 
                 // Feed video data to renderer (fallback when direct processing not used)
+                // Pass source PTS (in milliseconds) from the video header
                 message.data?.let { data ->
-                    h264Renderer?.processData(data, message.flags)
+                    h264Renderer?.processDataWithPts(data, message.pts)
                 }
             }
 
@@ -1628,12 +1629,24 @@ class CarlinkManager(
      * This bypasses message parsing and matches Flutter's zero-copy architecture.
      *
      * The processor reads USB data directly into the H264Renderer's ring buffer,
-     * skipping the 20-byte video header (width, height, flags, length, unknown).
+     * skipping the 20-byte video header but extracting the source PTS.
+     *
+     * Video header structure (20 bytes):
+     * - offset 0: width (4 bytes)
+     * - offset 4: height (4 bytes)
+     * - offset 8: encoderState (4 bytes) - protocol ID: 3=AA, 7=CarPlay
+     * - offset 12: pts (4 bytes) - SOURCE PRESENTATION TIMESTAMP (milliseconds)
+     * - offset 16: flags (4 bytes) - always 0
+     *
+     * NOTE: Source PTS is critical for CarPlay which uses variable frame rate.
+     * Frames are only sent when UI changes, so synthetic 60fps timestamps would
+     * cause incorrect frame pacing.
      */
     private fun createVideoProcessor(): UsbDeviceWrapper.VideoDataProcessor {
         return object : UsbDeviceWrapper.VideoDataProcessor {
             override fun processVideoDirect(
                 payloadLength: Int,
+                sourcePtsMs: Int,
                 readCallback: (buffer: ByteArray, offset: Int, length: Int) -> Int,
             ) {
                 // Get the H264Renderer - if not available, discard data
@@ -1656,12 +1669,13 @@ class CarlinkManager(
                         return
                     }
 
-                // Use processDataDirect to write directly to ring buffer
+                // Use processDataDirectWithPts for accurate frame timing
                 // payloadLength includes the 20-byte video header
                 // skipBytes=20 tells the ring buffer to skip the header when reading
-                logVideoUsb { "processVideoDirect: payloadLength=$payloadLength" }
+                // sourcePtsMs is the presentation timestamp from video header (offset 12)
+                logVideoUsb { "processVideoDirect: payloadLength=$payloadLength, pts=$sourcePtsMs" }
 
-                renderer.processDataDirect(payloadLength, 20) { buffer, offset ->
+                renderer.processDataDirectWithPts(payloadLength, 20, sourcePtsMs) { buffer, offset ->
                     // Read USB data directly into the ring buffer
                     readCallback(buffer, offset, payloadLength)
                 }

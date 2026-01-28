@@ -153,9 +153,9 @@ object MessageParser {
                 header = header,
                 width = -1,
                 height = -1,
+                encoderState = -1,
+                pts = -1,
                 flags = -1,
-                length = -1,
-                unknown = -1,
                 data = null,
             )
         }
@@ -164,9 +164,13 @@ object MessageParser {
 
         val width = buffer.int
         val height = buffer.int
+        // Field names corrected per RE documentation (video_protocol.md):
+        // - offset 8: encoderState (protocol ID: 3=AA, 7=CarPlay)
+        // - offset 12: pts (source presentation timestamp in milliseconds)
+        // - offset 16: flags (always 0)
+        val encoderState = buffer.int
+        val pts = buffer.int
         val flags = buffer.int
-        val length = buffer.int
-        val unknown = buffer.int
 
         val videoData =
             if (payload.size > 20) {
@@ -181,9 +185,9 @@ object MessageParser {
             header = header,
             width = width,
             height = height,
+            encoderState = encoderState,
+            pts = pts,
             flags = flags,
-            length = length,
-            unknown = unknown,
             data = videoData,
         )
     }
@@ -359,17 +363,25 @@ class AudioDataMessage(
 
 /**
  * Video data message with H.264 frame data.
+ *
+ * Field names corrected per RE documentation (video_protocol.md, Jan 2026):
+ * - encoderState: Protocol identifier (3=Android Auto, 7=CarPlay)
+ * - pts: Source presentation timestamp in milliseconds from phone
+ * - flags: Always 0
  */
 class VideoDataMessage(
     header: MessageHeader,
     val width: Int,
     val height: Int,
+    /** Protocol identifier: 3=Android Auto, 7=CarPlay */
+    val encoderState: Int,
+    /** Source presentation timestamp in milliseconds from phone */
+    val pts: Int,
+    /** Flags (always 0) */
     val flags: Int,
-    val length: Int,
-    val unknown: Int,
     val data: ByteArray?,
 ) : Message(header) {
-    override fun toString(): String = "VideoData(${width}x$height, flags=$flags, length=$length)"
+    override fun toString(): String = "VideoData(${width}x$height, encoderState=$encoderState, pts=$pts)"
 }
 
 /**

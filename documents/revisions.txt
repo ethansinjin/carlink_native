@@ -69,3 +69,4 @@
 [51] :: Video; Skip Prepending When SPS Already Present, Add Diagnostic Logging for Corruption Analysis, Updated Incorrect Comment about once per session SPS+PPS. Its every frame, Increased Search Limit on IDR Frame check.
 [52] :: Some more Video tweaks. If Intel platform will attempt FULL flush, destroy, recreate of codec. Video issues might be faulty General Motor + Intel Software Design on gminfo3.7 - 3.8 hardware.
 [53] :: Hid logs and session capture tabs behind a toggle. Removed Audio Sample Rate Option
+[54] :: GM AAOS (gminfo3.7) optimization testing. Use Video PTS instead of synthetic timing, lower buffer sizes. Airplay.conf changes (dam icon label). Audio Thread priority change

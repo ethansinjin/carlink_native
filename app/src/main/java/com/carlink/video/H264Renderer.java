@@ -28,6 +28,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Locale;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import com.carlink.util.AppExecutors;
@@ -122,9 +123,22 @@ public class H264Renderer {
     private boolean pendingKeyframeRequest = false;
 
     // Presentation timestamp for frame ordering
+    // Updated Jan 2026: Now uses source PTS from video header when available
     private final AtomicLong presentationTimeUs = new AtomicLong(0);
     private static final long DEFAULT_FRAME_DURATION_US = 16667; // ~60fps
     private volatile long frameDurationUs = DEFAULT_FRAME_DURATION_US;
+
+    // Source PTS queue - stores presentation timestamps from video headers (in microseconds)
+    // Each packet written to ring buffer has its PTS enqueued here for later retrieval
+    private final ConcurrentLinkedQueue<Long> sourcePtsQueue = new ConcurrentLinkedQueue<>();
+    private volatile boolean useSourcePts = true; // Enable source PTS by default
+
+    // Frame drop detection using source PTS gaps (Jan 2026)
+    // Detected when PTS gap > 50ms (more than 1.5 frames at 30fps)
+    private static final int FRAME_DROP_THRESHOLD_MS = 50;
+    private static final int IDR_REQUEST_GAP_THRESHOLD_MS = 500;
+    private final AtomicInteger droppedFrameCount = new AtomicInteger(0);
+    private volatile long lastSourcePtsMs = -1;
 
     // SPS/PPS caching for codec recovery after flush/reset AND continuous operation
     // H.264 decoders require SPS+PPS before any IDR frame can be decoded.
@@ -154,12 +168,23 @@ public class H264Renderer {
     // Set from PlatformDetector.requiresIntelMediaCodecFixes() via constructor
     private final boolean requiresIntelVpuWorkaround;
 
+    /**
+     * Calculate optimal ring buffer size based on resolution.
+     *
+     * Updated Jan 2026 based on USB capture analysis:
+     * - 98.5% of frames arrive within 100ms (normal jitter)
+     * - Normal jitter σ = 9.4ms, average frame size = 8.9KB
+     * - Large gaps (>100ms) are source-side issues, not fixable by buffering
+     * - GM AAOS native stack uses minimal buffering
+     *
+     * Reduced from 8-64MB to 2-8MB to match GM's philosophy and reduce latency.
+     */
     private int calculateOptimalBufferSize(int width, int height) {
         int pixels = width * height;
-        if (pixels <= 1920 * 1080) return 8 * 1024 * 1024;
-        if (pixels <= 2400 * 960) return 16 * 1024 * 1024;
-        if (pixels <= 3840 * 2160) return 32 * 1024 * 1024;
-        return 64 * 1024 * 1024;
+        if (pixels <= 1920 * 1080) return 2 * 1024 * 1024;   // 2MB (was 8MB)
+        if (pixels <= 2400 * 960) return 4 * 1024 * 1024;    // 4MB (was 16MB)
+        if (pixels <= 3840 * 2160) return 6 * 1024 * 1024;   // 6MB (was 32MB)
+        return 8 * 1024 * 1024;                               // 8MB (was 64MB)
     }
 
     private int calculateOptimalPoolSize(int width, int height) {
@@ -265,6 +290,12 @@ public class H264Renderer {
         totalBytesProcessed.set(0);
         consecutiveOutputFrames = 0;
 
+        // CRITICAL: Clear source PTS queue on fresh start to ensure sync with ring buffer
+        // Without this, stale PTS values could accumulate and cause queue/data mismatch
+        sourcePtsQueue.clear();
+        lastSourcePtsMs = -1;
+        presentationTimeUs.set(0);
+
         log("start - Resolution: " + width + "x" + height + ", Surface: " + (surface != null));
 
         try {
@@ -322,8 +353,16 @@ public class H264Renderer {
             cacheCodecConfigData(byteBuffer, bytesWritten);
         }
 
-        // Use monotonic presentation timestamp for proper frame ordering
-        long pts = presentationTimeUs.getAndAdd(frameDurationUs);
+        // Get presentation timestamp - prefer source PTS from queue, fall back to synthetic
+        Long sourcePts = sourcePtsQueue.poll();
+        long pts;
+        if (useSourcePts && sourcePts != null && sourcePts >= 0) {
+            // Use source PTS from video header (already in microseconds)
+            pts = sourcePts;
+        } else {
+            // Fall back to synthetic monotonic timestamp
+            pts = presentationTimeUs.getAndAdd(frameDurationUs);
+        }
 
         // For IDR frames: prepend cached SPS/PPS to ensure decoder refresh
         boolean isIdrFrame = (nalType == 5) || containsIdrFrame(byteBuffer, bytesWritten);
@@ -410,6 +449,8 @@ public class H264Renderer {
         codecAvailableBufferIndexes.clear();
         poolInitialized = false;
         presentationTimeUs.set(0);
+        sourcePtsQueue.clear();
+        lastSourcePtsMs = -1;
     }
 
 
@@ -455,6 +496,11 @@ public class H264Renderer {
         synchronized (codecLock) {
             codecAvailableBufferIndexes.clear();
             ringBuffer.reset();
+
+            // CRITICAL: Clear source PTS queue on reset to maintain sync with ring buffer
+            // The ring buffer is being reset, so any queued PTS values are now invalid
+            sourcePtsQueue.clear();
+            lastSourcePtsMs = -1;
 
             framesReceivedSinceReset = 0;
             framesDecodedSinceReset = 0;
@@ -559,6 +605,9 @@ public class H264Renderer {
                 isPaused = true;
                 codecAvailableBufferIndexes.clear();
                 ringBuffer.reset();
+                // Clear PTS queue when ring buffer is reset to maintain sync
+                sourcePtsQueue.clear();
+                lastSourcePtsMs = -1;
                 log("[LIFECYCLE] Codec paused");
             } catch (Exception e) {
                 log("[LIFECYCLE] pause() failed: " + e);
@@ -602,6 +651,9 @@ public class H264Renderer {
                         mCodec.flush();
                         ringBuffer.reset();
                         codecAvailableBufferIndexes.clear();
+                        // Clear PTS queue when ring buffer is reset to maintain sync
+                        sourcePtsQueue.clear();
+                        lastSourcePtsMs = -1;
                         mCodec.start();  // Required after flush() in async mode
                         isPaused = false;
                         codecStartTime = System.currentTimeMillis();
@@ -659,6 +711,8 @@ public class H264Renderer {
         codecAvailableBufferIndexes.clear();
         ringBuffer.reset();
         presentationTimeUs.set(0);
+        sourcePtsQueue.clear();
+        lastSourcePtsMs = -1;
 
         this.surface = newSurface;
         try {
@@ -799,14 +853,69 @@ public class H264Renderer {
         return null;
     }
 
+    /**
+     * Process video data with source presentation timestamp.
+     * Used by fallback path when direct processing is not available.
+     *
+     * @param data H.264 video data
+     * @param sourcePtsMs Source presentation timestamp in milliseconds from video header
+     */
+    public void processDataWithPts(byte[] data, int sourcePtsMs) {
+        if (data == null || data.length == 0) return;
+
+        processDataDirectWithPts(data.length, 0, sourcePtsMs, (buffer, offset) -> {
+            System.arraycopy(data, 0, buffer, offset, data.length);
+        });
+    }
+
+    /**
+     * @deprecated Use processDataWithPts() instead for accurate frame timing
+     */
+    @Deprecated
     public void processData(byte[] data, int flags) {
         if (data == null || data.length == 0) return;
 
+        // Legacy path: use synthetic timestamps
         processDataDirect(data.length, 0, (buffer, offset) -> {
             System.arraycopy(data, 0, buffer, offset, data.length);
         });
     }
 
+    /**
+     * Process video data directly with source PTS.
+     * Writes to ring buffer and enqueues source PTS for decoder to use.
+     *
+     * @param length Total payload length including header
+     * @param skipBytes Bytes to skip (video header size)
+     * @param sourcePtsMs Source presentation timestamp in milliseconds
+     * @param callback Callback to write data to buffer
+     */
+    public void processDataDirectWithPts(int length, int skipBytes, int sourcePtsMs,
+                                         PacketRingByteBuffer.DirectWriteCallback callback) {
+        totalFramesReceived.incrementAndGet();
+        totalBytesProcessed.addAndGet(length);
+
+        long currentTime = System.currentTimeMillis();
+        if (currentTime - lastPerfLogTime >= PERF_LOG_INTERVAL_MS) {
+            logPerformanceStats();
+            lastPerfLogTime = currentTime;
+        }
+
+        // Detect frame drops via PTS gaps before enqueueing
+        detectFrameDrops(sourcePtsMs);
+
+        // Enqueue source PTS (converted to microseconds for MediaCodec)
+        long sourcePtsUs = sourcePtsMs * 1000L;
+        sourcePtsQueue.offer(sourcePtsUs);
+
+        ringBuffer.directWriteToBuffer(length, skipBytes, callback);
+        feedCodec();
+    }
+
+    /**
+     * Legacy direct processing without source PTS.
+     * @deprecated Use processDataDirectWithPts() instead
+     */
     public void processDataDirect(int length, int skipBytes, PacketRingByteBuffer.DirectWriteCallback callback) {
         totalFramesReceived.incrementAndGet();
         totalBytesProcessed.addAndGet(length);
@@ -817,8 +926,56 @@ public class H264Renderer {
             lastPerfLogTime = currentTime;
         }
 
+        // No source PTS available - enqueue -1 to signal synthetic PTS should be used
+        sourcePtsQueue.offer(-1L);
+
         ringBuffer.directWriteToBuffer(length, skipBytes, callback);
         feedCodec();
+    }
+
+    /**
+     * Detect frame drops via PTS gaps and request IDR if needed.
+     * Called for each incoming frame before it's queued.
+     *
+     * @param currentPtsMs Current frame's source PTS in milliseconds
+     */
+    private void detectFrameDrops(int currentPtsMs) {
+        if (lastSourcePtsMs > 0 && currentPtsMs > 0) {
+            long gap = currentPtsMs - lastSourcePtsMs;
+
+            if (gap > FRAME_DROP_THRESHOLD_MS) {
+                // Estimate missed frames (assuming 30fps = 33ms per frame)
+                int missedFrames = (int) (gap / 33) - 1;
+                if (missedFrames > 0) {
+                    droppedFrameCount.addAndGet(missedFrames);
+                    log("[FRAME_DROP] Gap: " + gap + "ms, ~" + missedFrames + " frames missed (total: " + droppedFrameCount.get() + ")");
+                }
+
+                // Request IDR after large gaps (>500ms) to ensure decoder can recover
+                if (gap > IDR_REQUEST_GAP_THRESHOLD_MS) {
+                    long now = System.currentTimeMillis();
+                    if (now - lastKeyframeRequestTime > KEYFRAME_REQUEST_COOLDOWN_MS) {
+                        log("[GAP_RECOVERY] Large gap: " + gap + "ms - requesting IDR");
+                        if (keyframeCallback != null) {
+                            try {
+                                keyframeCallback.onKeyframeNeeded();
+                                lastKeyframeRequestTime = now;
+                            } catch (Exception e) {
+                                log("[GAP_RECOVERY] IDR request failed: " + e.getMessage());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        lastSourcePtsMs = currentPtsMs;
+    }
+
+    /**
+     * Get total dropped frame count detected via PTS gaps.
+     */
+    public int getDroppedFrameCount() {
+        return droppedFrameCount.get();
     }
 
 
@@ -923,7 +1080,14 @@ public class H264Renderer {
                                 cacheCodecConfigData(byteBuffer, dataSize);
                             }
 
-                            long pts = presentationTimeUs.getAndAdd(frameDurationUs);
+                            // Get presentation timestamp - prefer source PTS, fall back to synthetic
+                            Long sourcePts = sourcePtsQueue.poll();
+                            long pts;
+                            if (useSourcePts && sourcePts != null && sourcePts >= 0) {
+                                pts = sourcePts;
+                            } else {
+                                pts = presentationTimeUs.getAndAdd(frameDurationUs);
+                            }
 
                             // For IDR frames: prepend cached SPS/PPS to ensure decoder refresh
                             // This prevents progressive degradation during continuous operation
