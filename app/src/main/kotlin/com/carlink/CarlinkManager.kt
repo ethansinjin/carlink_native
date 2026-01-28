@@ -501,7 +501,8 @@ class CarlinkManager(
         val refreshedConfig =
             config.copy(
                 audioTransferMode = userConfig.audioTransferMode,
-                sampleRate = userConfig.sampleRate.hz,
+                // Sample rate is hardcoded to 48kHz - not user configurable
+                sampleRate = 48000,
                 micType =
                     when (userConfig.micSource) {
                         MicSourceConfig.APP -> "os"

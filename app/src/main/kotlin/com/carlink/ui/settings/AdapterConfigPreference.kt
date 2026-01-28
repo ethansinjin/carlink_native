@@ -102,39 +102,6 @@ enum class CallQualityConfig(
 }
 
 /**
- * Sample rate configuration for adapter audio output.
- * Controls the mediaSound parameter sent to the adapter during initialization.
- */
-enum class SampleRateConfig(
-    val hz: Int,
-    val mediaSound: Int,
-) {
-    /**
-     * 44.1kHz - Standard CD quality audio.
-     * Adapter sends audio with decodeType 1 or 2.
-     */
-    RATE_44100(44100, 0),
-
-    /**
-     * 48kHz - Professional/high-quality audio (default for GM AAOS).
-     * Adapter sends audio with decodeType 4.
-     */
-    RATE_48000(48000, 1),
-    ;
-
-    companion object {
-        val DEFAULT = RATE_48000
-
-        fun fromHz(hz: Int): SampleRateConfig =
-            when (hz) {
-                44100 -> RATE_44100
-                48000 -> RATE_48000
-                else -> DEFAULT
-            }
-    }
-}
-
-/**
  * Adapter config preferences with DataStore + SharedPreferences sync cache for ANR-free startup reads.
  * Tracks pending changes for minimal re-initialization on reconnect.
  */
@@ -158,9 +125,6 @@ class AdapterConfigPreference private constructor(
         private val KEY_AUDIO_SOURCE_CONFIGURED = booleanPreferencesKey("audio_source_configured")
         private val KEY_AUDIO_SOURCE_BLUETOOTH = booleanPreferencesKey("audio_source_bluetooth")
 
-        // Sample rate: stored as Hz value (44100 or 48000)
-        private val KEY_SAMPLE_RATE = intPreferencesKey("sample_rate")
-
         // Mic source: stored as command code (7=phone, 15=adapter)
         private val KEY_MIC_SOURCE = intPreferencesKey("mic_source")
 
@@ -178,7 +142,6 @@ class AdapterConfigPreference private constructor(
         private const val SYNC_CACHE_PREFS_NAME = "carlink_adapter_config_sync_cache"
         private const val SYNC_CACHE_KEY_AUDIO_CONFIGURED = "audio_source_configured"
         private const val SYNC_CACHE_KEY_AUDIO_BLUETOOTH = "audio_source_bluetooth"
-        private const val SYNC_CACHE_KEY_SAMPLE_RATE = "sample_rate"
         private const val SYNC_CACHE_KEY_MIC_SOURCE = "mic_source"
         private const val SYNC_CACHE_KEY_WIFI_BAND = "wifi_band"
         private const val SYNC_CACHE_KEY_CALL_QUALITY = "call_quality"
@@ -191,7 +154,6 @@ class AdapterConfigPreference private constructor(
          */
         object ConfigKey {
             const val AUDIO_SOURCE = "audio_source"
-            const val SAMPLE_RATE = "sample_rate"
             const val MIC_SOURCE = "mic_source"
             const val WIFI_BAND = "wifi_band"
             const val CALL_QUALITY = "call_quality"
@@ -256,59 +218,6 @@ class AdapterConfigPreference private constructor(
             logInfo("Audio source preference saved: $config (sync cache updated)", tag = "AdapterConfig")
         } catch (e: Exception) {
             logError("Failed to save audio source preference: $e", tag = "AdapterConfig")
-            throw e
-        }
-    }
-
-    val sampleRateFlow: Flow<SampleRateConfig> =
-        dataStore.data.map { preferences ->
-            val hz = preferences[KEY_SAMPLE_RATE] ?: SampleRateConfig.DEFAULT.hz
-            SampleRateConfig.fromHz(hz)
-        }
-
-    /**
-     * Get current sample rate configuration synchronously.
-     * Uses SharedPreferences cache to avoid ANR.
-     *
-     * This is safe to call from the main thread during Activity.onCreate().
-     */
-    fun getSampleRateSync(): SampleRateConfig {
-        val hz = syncCache.getInt(SYNC_CACHE_KEY_SAMPLE_RATE, SampleRateConfig.DEFAULT.hz)
-        return SampleRateConfig.fromHz(hz)
-    }
-
-    /**
-     * Get current sample rate configuration.
-     *
-     * Note: Prefer getSampleRateSync() for startup reads to avoid ANR.
-     */
-    suspend fun getSampleRate(): SampleRateConfig =
-        try {
-            val preferences = dataStore.data.first()
-            val hz = preferences[KEY_SAMPLE_RATE] ?: SampleRateConfig.DEFAULT.hz
-            SampleRateConfig.fromHz(hz)
-        } catch (e: Exception) {
-            logError("Failed to read sample rate preference: $e", tag = "AdapterConfig")
-            SampleRateConfig.DEFAULT
-        }
-
-    /**
-     * Set sample rate configuration.
-     * Updates both DataStore and sync cache atomically.
-     */
-    suspend fun setSampleRate(config: SampleRateConfig) {
-        try {
-            // Update DataStore (source of truth)
-            dataStore.edit { preferences ->
-                preferences[KEY_SAMPLE_RATE] = config.hz
-            }
-            // Update sync cache for instant reads on next startup
-            syncCache.edit().putInt(SYNC_CACHE_KEY_SAMPLE_RATE, config.hz).apply()
-            // Track as pending change for next initialization
-            addPendingChange(ConfigKey.SAMPLE_RATE)
-            logInfo("Sample rate preference saved: $config (${config.hz}Hz)", tag = "AdapterConfig")
-        } catch (e: Exception) {
-            logError("Failed to save sample rate preference: $e", tag = "AdapterConfig")
             throw e
         }
     }
@@ -409,8 +318,6 @@ class AdapterConfigPreference private constructor(
     data class UserConfig(
         /** Audio transfer mode: true = bluetooth, false = adapter (default) */
         val audioTransferMode: Boolean,
-        /** Sample rate configuration for media audio */
-        val sampleRate: SampleRateConfig,
         /** Microphone source configuration */
         val micSource: MicSourceConfig,
         /** WiFi band configuration */
@@ -422,7 +329,6 @@ class AdapterConfigPreference private constructor(
             val DEFAULT =
                 UserConfig(
                     audioTransferMode = false, // ADAPTER is default
-                    sampleRate = SampleRateConfig.DEFAULT,
                     micSource = MicSourceConfig.DEFAULT,
                     wifiBand = WiFiBandConfig.DEFAULT,
                     callQuality = CallQualityConfig.DEFAULT,
@@ -438,13 +344,11 @@ class AdapterConfigPreference private constructor(
      */
     fun getUserConfigSync(): UserConfig {
         val audioSource = getAudioSourceSync()
-        val sampleRate = getSampleRateSync()
         val micSource = getMicSourceSync()
         val wifiBand = getWifiBandSync()
         val callQuality = getCallQualitySync()
         return UserConfig(
             audioTransferMode = audioSource == AudioSourceConfig.BLUETOOTH,
-            sampleRate = sampleRate,
             micSource = micSource,
             wifiBand = wifiBand,
             callQuality = callQuality,
@@ -458,10 +362,8 @@ class AdapterConfigPreference private constructor(
      */
     suspend fun getUserConfig(): UserConfig {
         val audioSource = getAudioSource()
-        val sampleRate = getSampleRate()
         return UserConfig(
             audioTransferMode = audioSource == AudioSourceConfig.BLUETOOTH,
-            sampleRate = sampleRate,
             micSource = getMicSourceSync(),
             wifiBand = getWifiBandSync(),
             callQuality = getCallQualitySync(),
@@ -478,7 +380,6 @@ class AdapterConfigPreference private constructor(
             dataStore.edit { preferences ->
                 preferences.remove(KEY_AUDIO_SOURCE_CONFIGURED)
                 preferences.remove(KEY_AUDIO_SOURCE_BLUETOOTH)
-                preferences.remove(KEY_SAMPLE_RATE)
                 preferences.remove(KEY_MIC_SOURCE)
                 preferences.remove(KEY_WIFI_BAND)
                 preferences.remove(KEY_CALL_QUALITY)
@@ -491,7 +392,6 @@ class AdapterConfigPreference private constructor(
                 .apply {
                     remove(SYNC_CACHE_KEY_AUDIO_CONFIGURED)
                     remove(SYNC_CACHE_KEY_AUDIO_BLUETOOTH)
-                    remove(SYNC_CACHE_KEY_SAMPLE_RATE)
                     remove(SYNC_CACHE_KEY_MIC_SOURCE)
                     remove(SYNC_CACHE_KEY_WIFI_BAND)
                     remove(SYNC_CACHE_KEY_CALL_QUALITY)
@@ -510,11 +410,9 @@ class AdapterConfigPreference private constructor(
      */
     suspend fun getPreferencesSummary(): Map<String, Any?> {
         val audioSource = getAudioSource()
-        val sampleRate = getSampleRate()
         return mapOf(
             "audioSource" to audioSource.name,
             "audioTransferMode" to if (audioSource == AudioSourceConfig.BLUETOOTH) "true (bluetooth)" else "false (adapter)",
-            "sampleRate" to "${sampleRate.hz}Hz",
             "micSource" to getMicSourceSync().name,
             "wifiBand" to getWifiBandSync().name,
             "callQuality" to getCallQualitySync().name,

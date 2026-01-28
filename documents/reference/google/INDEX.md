@@ -30,15 +30,34 @@ Downloaded: 2026-01-13
 ### Buffer Invalidation Rule
 > "After calling getInputBuffer() any ByteBuffer previously returned for the same input index MUST no longer be used."
 
-This directly impacts `queueIdrWithSpsPps()` at line 1463 which calls `getInputBuffer(bufferIndex)` a second time with the same index.
+✅ **COMPLIANT**: `queueIdrWithSpsPps()` receives the ByteBuffer as a parameter from the callback - it does NOT call `getInputBuffer()` a second time. The buffer is modified in-place correctly.
 
 ### Flush Requires CSD Resubmission
 > "If you flush the codec too soon after start() – generally, before the first output buffer is received – you will need to resubmit the codec-specific-data."
 
+✅ **COMPLIANT**: `requestCodecConfigInjection()` sets `codecConfigPending=true` after flush, and `onInputBufferAvailable` checks this flag to inject cached SPS+PPS via `injectCodecConfigToBuffer()`.
+
 ### Async Mode Flush Requires start()
 > "After calling flush(), you MUST call start() to resume receiving input buffers."
+
+✅ **COMPLIANT**: All flush paths (`reset()`, `resume()`, `recreateCodecWithSurface()`) call `mCodec.start()` after `mCodec.flush()`.
 
 ### Mid-Stream SPS/PPS Injection
 > "Package the entire new codec-specific configuration data together with the key frame into a single buffer (including start codes), and submit as a regular input buffer."
 
-This validates the approach of prepending SPS+PPS to IDR frames, but the implementation must not call getInputBuffer() twice.
+✅ **COMPLIANT**: `queueIdrWithSpsPps()` packages SPS+PPS+IDR into a single buffer and queues as a regular input buffer (without BUFFER_FLAG_CODEC_CONFIG), which is correct for mid-stream injection.
+
+## H264Renderer.java Compliance Summary
+
+| Requirement | Status | Implementation |
+|-------------|--------|----------------|
+| Buffer invalidation rule | ✅ | Buffer passed as param, not re-fetched |
+| CSD resubmission after flush | ✅ | `codecConfigPending` + `injectCodecConfigToBuffer()` |
+| start() after flush() in async | ✅ | All paths call start() after flush() |
+| Mid-stream SPS/PPS | ✅ | Combined buffer as regular input |
+| Low latency check before enable | ✅ | `isFeatureSupported(FEATURE_LowLatency)` |
+| Realtime priority | ✅ | `KEY_PRIORITY = 0` |
+| No dequeue* calls in async mode | ✅ | Uses only callback-provided indices |
+| Dedicated callback thread | ✅ | `HandlerThread` with `THREAD_PRIORITY_URGENT_AUDIO` |
+
+Last verified: 2026-01-26

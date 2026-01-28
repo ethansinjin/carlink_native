@@ -10,14 +10,35 @@ import androidx.compose.ui.graphics.vector.ImageVector
 enum class SettingsTab(
     val title: String,
     val icon: ImageVector,
+    val requiresDebugMode: Boolean = false,
 ) {
-    CONTROL("Control", Icons.Default.Settings),
-    LOGS("Logs", Icons.AutoMirrored.Filled.Article),
-    PLAYBACK("Playback", Icons.Default.PlayCircle),
-    RECORD("Record", Icons.Default.FiberManualRecord),
+    CONTROL("Control", Icons.Default.Settings, requiresDebugMode = false),
+    LOGS("Logs", Icons.AutoMirrored.Filled.Article, requiresDebugMode = true),
+    PLAYBACK("Playback", Icons.Default.PlayCircle, requiresDebugMode = true),
+    RECORD("Record", Icons.Default.FiberManualRecord, requiresDebugMode = true),
     ;
 
     companion object {
-        val visibleTabs: List<SettingsTab> = entries
+        /**
+         * Returns the list of visible tabs based on debug mode state.
+         *
+         * @param debugModeEnabled If true, all tabs are visible. If false, only non-debug tabs are shown.
+         */
+        fun getVisibleTabs(debugModeEnabled: Boolean): List<SettingsTab> =
+            if (debugModeEnabled) {
+                entries.toList()
+            } else {
+                entries.filter { !it.requiresDebugMode }
+            }
+
+        /**
+         * Legacy property for backward compatibility.
+         * @deprecated Use getVisibleTabs(debugModeEnabled) instead.
+         */
+        @Deprecated(
+            message = "Use getVisibleTabs(debugModeEnabled) instead",
+            replaceWith = ReplaceWith("getVisibleTabs(true)"),
+        )
+        val visibleTabs: List<SettingsTab> = entries.toList()
     }
 }

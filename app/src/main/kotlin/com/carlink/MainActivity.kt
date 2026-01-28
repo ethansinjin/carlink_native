@@ -314,8 +314,8 @@ class MainActivity : ComponentActivity() {
                 icon256Data = icon256,
                 // User-configured audio transfer mode (false=adapter, true=bluetooth)
                 audioTransferMode = userConfig.audioTransferMode,
-                // User-configured sample rate for media audio
-                sampleRate = userConfig.sampleRate.hz,
+                // Hardcoded to 48kHz - professional quality audio for GM AAOS
+                sampleRate = 48000,
                 // User-configured mic, wifi, and call quality
                 micType = micType,
                 wifiType = wifiType,
@@ -335,7 +335,7 @@ class MainActivity : ComponentActivity() {
         )
         logInfo(
             "[ADAPTER_CONFIG] User config: audioTransferMode=${if (userConfig.audioTransferMode) "bluetooth" else "adapter"}, " +
-                "sampleRate=${userConfig.sampleRate.hz}Hz, mic=$micType, wifi=$wifiType, callQuality=${userConfig.callQuality.name}",
+                "sampleRate=48000Hz (hardcoded), mic=$micType, wifi=$wifiType, callQuality=${userConfig.callQuality.name}",
             tag = "MAIN",
         )
 

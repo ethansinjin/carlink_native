@@ -45,6 +45,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Bluetooth
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.DeleteForever
@@ -133,10 +134,10 @@ import com.carlink.ui.components.LoadingSpinner
 import com.carlink.ui.settings.AdapterConfigPreference
 import com.carlink.ui.settings.AudioSourceConfig
 import com.carlink.ui.settings.CallQualityConfig
+import com.carlink.ui.settings.DebugModePreference
 import com.carlink.ui.settings.DisplayMode
 import com.carlink.ui.settings.DisplayModePreference
 import com.carlink.ui.settings.MicSourceConfig
-import com.carlink.ui.settings.SampleRateConfig
 import com.carlink.ui.settings.SettingsTab
 import com.carlink.ui.settings.WiFiBandConfig
 import com.carlink.ui.settings.CapturePlaybackContent
@@ -159,6 +160,25 @@ fun SettingsScreen(
     var selectedTab by remember { mutableStateOf(SettingsTab.CONTROL) }
     val context = LocalContext.current
     val colorScheme = MaterialTheme.colorScheme
+
+    // Debug mode preference - controls visibility of developer tabs
+    val debugModePreference = remember { DebugModePreference.getInstance(context) }
+    val debugModeEnabled by debugModePreference.debugModeEnabledFlow.collectAsStateWithLifecycle(
+        initialValue = debugModePreference.isDebugModeEnabledSync(),
+    )
+
+    // Get visible tabs based on debug mode
+    val visibleTabs = remember(debugModeEnabled) {
+        SettingsTab.getVisibleTabs(debugModeEnabled)
+    }
+
+    // Auto-switch to CONTROL tab if current tab becomes hidden (debug mode disabled)
+    LaunchedEffect(debugModeEnabled, selectedTab) {
+        if (selectedTab.requiresDebugMode && !debugModeEnabled) {
+            logInfo("[UI_STATE] Debug mode disabled - switching from $selectedTab to CONTROL", tag = "UI")
+            selectedTab = SettingsTab.CONTROL
+        }
+    }
 
     // Log settings screen entry and tab changes
     LaunchedEffect(Unit) {
@@ -222,7 +242,7 @@ fun SettingsScreen(
                     containerColor = colorScheme.surface,
                 ) {
                     Spacer(modifier = Modifier.weight(1f))
-                    SettingsTab.visibleTabs.forEach { tab ->
+                    visibleTabs.forEach { tab ->
                         NavigationRailItem(
                             selected = selectedTab == tab,
                             onClick = {
@@ -271,7 +291,7 @@ fun SettingsScreen(
                         .weight(1f),
             ) {
                 when (selectedTab) {
-                    SettingsTab.CONTROL -> ControlTabContent(carlinkManager)
+                    SettingsTab.CONTROL -> ControlTabContent(carlinkManager, debugModePreference)
                     SettingsTab.LOGS -> LogsTabContent(context, fileLogManager)
                     SettingsTab.PLAYBACK -> PlaybackTabContent(carlinkManager, capturePlaybackManager, onNavigateBack)
                     SettingsTab.RECORD -> RecordTabContent(carlinkManager)
@@ -288,7 +308,10 @@ private enum class ButtonSeverity {
 }
 
 @Composable
-private fun ControlTabContent(carlinkManager: CarlinkManager) {
+private fun ControlTabContent(
+    carlinkManager: CarlinkManager,
+    debugModePreference: DebugModePreference,
+) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     var isProcessing by remember { mutableStateOf(false) }
@@ -302,6 +325,11 @@ private fun ControlTabContent(carlinkManager: CarlinkManager) {
 
     val adapterConfigPreference = remember { AdapterConfigPreference.getInstance(context) }
     var showAdapterConfigDialog by remember { mutableStateOf(false) }
+
+    // Debug mode state
+    val debugModeEnabled by debugModePreference.debugModeEnabledFlow.collectAsStateWithLifecycle(
+        initialValue = debugModePreference.isDebugModeEnabledSync(),
+    )
 
     val windowInfo = LocalWindowInfo.current
     val density = LocalDensity.current
@@ -464,6 +492,17 @@ private fun ControlTabContent(carlinkManager: CarlinkManager) {
                     }
                 }
             }
+
+            // Developer Options Card - full width
+            DeveloperOptionsCard(
+                debugModeEnabled = debugModeEnabled,
+                onDebugModeChanged = { enabled ->
+                    scope.launch {
+                        debugModePreference.setDebugModeEnabled(enabled)
+                        logInfo("[UI_ACTION] Debug mode ${if (enabled) "enabled" else "disabled"}", tag = "UI")
+                    }
+                },
+            )
         }
     }
 
@@ -541,6 +580,70 @@ private fun ControlCard(
             Spacer(modifier = Modifier.height(20.dp))
 
             content()
+        }
+    }
+}
+
+/**
+ * Developer Options Card with debug mode toggle.
+ * When enabled, shows advanced tabs (Logs, Playback, Record) in the NavigationRail.
+ */
+@Composable
+private fun DeveloperOptionsCard(
+    debugModeEnabled: Boolean,
+    onDebugModeChanged: (Boolean) -> Unit,
+) {
+    val colorScheme = MaterialTheme.colorScheme
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(24.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            // Icon
+            Icon(
+                imageVector = Icons.Default.Build,
+                contentDescription = null,
+                tint = colorScheme.primary,
+                modifier = Modifier.size(24.dp),
+            )
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            // Title and description
+            Column(
+                modifier = Modifier.weight(1f),
+            ) {
+                Text(
+                    text = "Developer Options",
+                    style = MaterialTheme.typography.headlineSmall.copy(
+                        fontWeight = FontWeight.SemiBold,
+                    ),
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Enable advanced tabs: Logs, Playback, Record",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                )
+            }
+
+            Spacer(modifier = Modifier.width(16.dp))
+
+            // Switch
+            Switch(
+                checked = debugModeEnabled,
+                onCheckedChange = onDebugModeChanged,
+            )
         }
     }
 }
@@ -716,9 +819,6 @@ private fun AdapterConfigurationDialog(
     val savedAudioSource by adapterConfigPreference.audioSourceFlow.collectAsStateWithLifecycle(
         initialValue = AudioSourceConfig.DEFAULT,
     )
-    val savedSampleRate by adapterConfigPreference.sampleRateFlow.collectAsStateWithLifecycle(
-        initialValue = SampleRateConfig.DEFAULT,
-    )
     val savedMicSource by adapterConfigPreference.micSourceFlow.collectAsStateWithLifecycle(
         initialValue = MicSourceConfig.DEFAULT,
     )
@@ -731,14 +831,12 @@ private fun AdapterConfigurationDialog(
 
     // Local state for editing - allows cancel without saving
     var selectedAudioSource by remember { mutableStateOf(savedAudioSource) }
-    var selectedSampleRate by remember { mutableStateOf(savedSampleRate) }
     var selectedMicSource by remember { mutableStateOf(savedMicSource) }
     var selectedWifiBand by remember { mutableStateOf(savedWifiBand) }
     var selectedCallQuality by remember { mutableStateOf(savedCallQuality) }
 
     // Sync local state when saved value loads (for initial load)
     LaunchedEffect(savedAudioSource) { selectedAudioSource = savedAudioSource }
-    LaunchedEffect(savedSampleRate) { selectedSampleRate = savedSampleRate }
     LaunchedEffect(savedMicSource) { selectedMicSource = savedMicSource }
     LaunchedEffect(savedWifiBand) { selectedWifiBand = savedWifiBand }
     LaunchedEffect(savedCallQuality) { selectedCallQuality = savedCallQuality }
@@ -747,7 +845,6 @@ private fun AdapterConfigurationDialog(
     // All adapter configuration changes require app restart
     val hasChanges =
         selectedAudioSource != savedAudioSource ||
-            selectedSampleRate != savedSampleRate ||
             selectedMicSource != savedMicSource ||
             selectedWifiBand != savedWifiBand ||
             selectedCallQuality != savedCallQuality
@@ -844,49 +941,6 @@ private fun AdapterConfigurationDialog(
                                 when (selectedAudioSource) {
                                     AudioSourceConfig.BLUETOOTH -> "Audio via phone Bluetooth to car stereo"
                                     AudioSourceConfig.ADAPTER -> "Audio via USB through this app"
-                                },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = colorScheme.primary,
-                        )
-                    }
-
-                    // Sample Rate Configuration Option
-                    ConfigurationOptionCard(
-                        title = "Sample Rate",
-                        description = "Audio sample rate for media playback",
-                        icon = Icons.Default.GraphicEq,
-                    ) {
-                        // Sample rate selection buttons
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        ) {
-                            // 44.1kHz button
-                            AudioSourceButton(
-                                label = "44.1 kHz",
-                                icon = Icons.Default.MusicNote,
-                                isSelected = selectedSampleRate == SampleRateConfig.RATE_44100,
-                                onClick = { selectedSampleRate = SampleRateConfig.RATE_44100 },
-                                modifier = Modifier.weight(1f),
-                            )
-
-                            // 48kHz button
-                            AudioSourceButton(
-                                label = "48 kHz",
-                                icon = Icons.Default.HighQuality,
-                                isSelected = selectedSampleRate == SampleRateConfig.RATE_48000,
-                                onClick = { selectedSampleRate = SampleRateConfig.RATE_48000 },
-                                modifier = Modifier.weight(1f),
-                            )
-                        }
-
-                        // Current selection indicator
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text =
-                                when (selectedSampleRate) {
-                                    SampleRateConfig.RATE_44100 -> "CD quality (44.1kHz)"
-                                    SampleRateConfig.RATE_48000 -> "Professional quality (48kHz)"
                                 },
                             style = MaterialTheme.typography.bodySmall,
                             color = colorScheme.primary,
@@ -1048,11 +1102,10 @@ private fun AdapterConfigurationDialog(
                     // Apply & Restart button - all adapter config changes require restart
                     Button(
                         onClick = {
-                            logWarn("[UI_ACTION] Adapter Config: Apply & Restart clicked - audio=$selectedAudioSource, sampleRate=$selectedSampleRate, mic=$selectedMicSource, wifi=$selectedWifiBand, callQuality=$selectedCallQuality", tag = "UI")
+                            logWarn("[UI_ACTION] Adapter Config: Apply & Restart clicked - audio=$selectedAudioSource, mic=$selectedMicSource, wifi=$selectedWifiBand, callQuality=$selectedCallQuality", tag = "UI")
                             scope.launch {
                                 // Save all configuration
                                 adapterConfigPreference.setAudioSource(selectedAudioSource)
-                                adapterConfigPreference.setSampleRate(selectedSampleRate)
                                 adapterConfigPreference.setMicSource(selectedMicSource)
                                 adapterConfigPreference.setWifiBand(selectedWifiBand)
                                 adapterConfigPreference.setCallQuality(selectedCallQuality)
