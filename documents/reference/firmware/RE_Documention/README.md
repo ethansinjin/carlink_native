@@ -20,6 +20,50 @@ This documentation consolidates research from multiple projects focused on rever
 
 ---
 
+## Adapter Role: Protocol Tunnel
+
+**Critical Understanding:** The CPC200-CCPA is a **protocol bridge**, not a media endpoint.
+
+```
+iPhone/Android                    Adapter                         Host App
+┌──────────────┐    AirPlay/    ┌─────────────┐      USB       ┌──────────────┐
+│  CarPlay UI  │───iAP2/AA────▶│   TUNNEL    │───────────────▶│   DECODER    │
+│  (H.264 enc) │                │  (forward)  │                │   (policy)   │
+└──────────────┘                └─────────────┘                └──────────────┘
+```
+
+**What the adapter DOES:**
+- Protocol handshake and authentication
+- Session establishment with phone
+- Forward H.264 video verbatim (no decode, no transcode)
+- Forward PCM audio verbatim
+- Prepend USB headers to data streams
+- Respond to keyframe requests
+
+**What the adapter does NOT do:**
+- Buffer video for quality
+- Pace or smooth frames
+- Correct timing or sync
+- Reset decoder on errors
+- Compensate for jitter
+- Make any policy decisions
+
+**All correctness decisions are the host application's responsibility.**
+
+### Implications for Host App Development
+
+| Adapter Provides | Host Must Handle |
+|------------------|------------------|
+| Raw H.264 NAL units | H.264 decoding |
+| USB frame headers with PTS | Timing policy (or ignore PTS) |
+| Passthrough without buffering | Jitter absorption |
+| Keyframe on request (100-200ms) | Error detection and recovery |
+| No quality assessment | Corruption detection and reset |
+
+> **The adapter is neutral. If video corrupts, the host app's policy is wrong.**
+
+---
+
 ## Hardware Summary
 
 | Component | Specification |
@@ -92,13 +136,13 @@ RE_Documention/
 | decode_type | Sample Rate | Purpose | Status |
 |-------------|-------------|---------|--------|
 | 2 | 44.1kHz Stereo | **Dual-purpose:** Commands (13 bytes) OR 44.1kHz audio | VERIFIED |
-| 3 | 8kHz Mono | Phone call (narrowband) | NEVER OBSERVED |
+| 3 | 8kHz Mono | Phone call (narrowband) | LEGACY - firmware code exists but never observed; may be removed functionality |
 | 4 | 48kHz Stereo | Standard CarPlay HD audio | VERIFIED |
 | 5 | 16kHz Mono | Voice (Siri, phone calls) | VERIFIED |
 
 **Notes:**
 - decode_type=2 behavior depends on payload size - see `02_Protocol_Reference/audio_protocol.md`
-- decode_type=3 (8kHz) exists in firmware but **never observed** in captures - CarPlay negotiates 16kHz (wideband) on modern iPhones
+- decode_type=3 (8kHz) exists in firmware code but **never observed** in captures - likely legacy code with functionality removed; no manual configuration produces 8kHz audio; modern iPhones negotiate 16kHz (wideband)
 - CallQuality Web UI setting has a **firmware bug** and does not affect sample rate - see `01_Firmware_Architecture/configuration.md`
 
 | audio_type | Channel | Direction |
@@ -136,6 +180,18 @@ Failure to do this causes cold start failures (~11.7 seconds to disconnect).
 ### Keyframe Recovery
 
 Send Frame command (0x0C) to request IDR. Adapter responds within 100-200ms with SPS + PPS + IDR frame.
+
+### Video Stream Characteristics (from 215K frame analysis)
+
+| Metric | Value | Source |
+|--------|-------|--------|
+| Session start | 100% begin with SPS+PPS+IDR | 10/10 sessions |
+| SPS/PPS bundling | Always with IDR, never standalone | 538+ IDRs |
+| IDR interval | Median 2000ms (range 83-2117ms) | 538 intervals |
+| Jitter std dev | 25.6ms (85% within ±40ms) | 215K frames |
+| Frame sizes | IDR: 49KB avg, P: 23KB avg | 215K frames |
+
+See `02_Protocol_Reference/video_protocol.md` for complete quantitative analysis.
 
 ---
 

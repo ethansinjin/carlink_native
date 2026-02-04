@@ -2,7 +2,7 @@
 
 **Purpose:** Complete riddleBoxCfg configuration keys reference
 **Consolidated from:** pi-carplay firmware analysis, carlink_native research
-**Last Updated:** 2026-01-20 (added CallQuality bug documentation)
+**Last Updated:** 2026-02-03 (added Host App vs Direct Access configuration analysis)
 
 ---
 
@@ -313,17 +313,187 @@ Controls whether GPS data from the head unit is forwarded to the phone.
 
 **Binary Evidence:** `BOX_CFG_HudGPSSwitch Closed, not use GPS from HUD`
 
-### GNSSCapability
-**Type:** Toggle (0/1) | **Default:** 0
+### GNSSCapability (Live-Tested Feb 2026)
+**Type:** Bitmask (0-65535) | **Default:** 0
 
-Advertises GNSS capability to connected phone during iAP2 identification.
+Detailed bitmask specifying which GNSS features are advertised to the phone during iAP2 identification.
 
 | Value | Behavior |
 |-------|----------|
-| 0 | GNSS not advertised |
-| 1 | GNSS capability advertised to phone |
+| 0 | No GNSS capability advertised; **LocationEngine disabled** |
+| 1+ | GNSS capability bitmask; **enables LocationEngine** (when DashboardInfo bit 1 is set) |
+
+**CRITICAL:** This setting is **REQUIRED** for `iAP2LocationEngine` to be enabled. Without `GNSSCapability ≥ 1`, setting `DashboardInfo` bit 1 has no effect.
 
 **Binary Evidence:** `GNSSCapability=%d` format string in ARMiPhoneIAP2
+
+### DashboardInfo (Live-Tested & Verified Feb 2026)
+**Type:** Bitmask (0-7) | **Default:** 1
+
+Controls which iAP2 data engines are enabled during identification. This is a **3-bit bitmask** where each bit enables a different data stream to the head unit:
+
+| Bit | Value | iAP2 Engine | Data Type | Requirements |
+|-----|-------|-------------|-----------|--------------|
+| 0 | 1 | **iAP2MediaPlayerEngine** | NowPlaying info (track, artist, album) | None |
+| 1 | 2 | **iAP2LocationEngine** | GPS/Location (NMEA, position) | GNSSCapability ≥ 1 |
+| 2 | 4 | **iAP2RouteGuidanceEngine** | Navigation TBT (turn-by-turn directions) | None |
+
+**IMPORTANT:** `iAP2CallStateEngine` is always enabled regardless of DashboardInfo value.
+
+**Common Values:**
+| Value | Bits Set | Engines Enabled |
+|-------|----------|-----------------|
+| 0 | None | CallState only |
+| 1 | Bit 0 | MediaPlayer + CallState (default) |
+| 2 | Bit 1 | LocationEngine + CallState (requires GNSSCapability ≥ 1) |
+| 3 | Bits 0+1 | MediaPlayer + Location + CallState |
+| 4 | Bit 2 | RouteGuidance + CallState |
+| 5 | Bits 0+2 | MediaPlayer + RouteGuidance + CallState |
+| 7 | All | All engines |
+
+**Live Test Results (Feb 2026 via SSH):**
+```
+DashboardInfo=1: iAP2MediaPlayerEngine ✓
+DashboardInfo=2: (nothing extra - GNSSCapability was 0)
+DashboardInfo=2 + GNSSCapability=1: iAP2LocationEngine ✓
+DashboardInfo=3 + GNSSCapability=1: MediaPlayer + Location ✓
+DashboardInfo=4: iAP2RouteGuidanceEngine ✓
+DashboardInfo=7 + GNSSCapability=1: All three engines ✓
+```
+
+**Engine Datastore:** `/etc/RiddleBoxData/AIEIPIEREngines.datastore`
+- Binary plist caching enabled engines
+- Created on first iAP2 connection after boot
+- Must be deleted (`rm -f`) for DashboardInfo changes to take effect
+
+**Binary Evidence (ARMiPhoneIAP2_unpacked):**
+```asm
+; At 0x15f50: Load DashboardInfo config value
+ldr r0, str.DashboardInfo      ; Load "DashboardInfo" key
+blx fcn.0006a43c               ; Read config value
+mov r7, r0                     ; r7 = DashboardInfo value
+
+; At 0x15f78-0x15f98: Test each bit and call corresponding engine init
+tst r7, #1                     ; Test bit 0 (MediaPlayer)
+bne -> bl 0x282b8              ; If set, initialize MediaPlayerEngine
+tst r7, #2                     ; Test bit 1 (Location)
+bne -> bl 0x2aa6c              ; If set, initialize LocationEngine
+tst r7, #4                     ; Test bit 2 (RouteGuidance)
+bne -> bl 0x2ebc4              ; If set, initialize RouteGuidanceEngine
+```
+
+**Protocol Integration:**
+- Used during iAP2 identification (`CiAP2IdentifyEngine`) to configure which data streams the adapter supports
+- Controls data flow TO the HUD (cluster display), not from it
+- Related D-Bus signal: `HU_GPS_DATA` for GPS data transmission
+- Related message type: `0x2A (DashBoard_DATA)` for dashboard data packets
+
+**Related Settings:**
+- `GNSSCapability`: **REQUIRED** for LocationEngine (bit 1). Must be ≥ 1.
+- `HudGPSSwitch`: Controls GPS data flow to HUD after engine is enabled
+- These settings work together during iAP2 capability negotiation
+
+**Recommended Configurations:**
+```bash
+# NowPlaying metadata only (most common use case)
+riddleBoxCfg -s DashboardInfo 1
+
+# NowPlaying + GPS location
+riddleBoxCfg -s DashboardInfo 3
+riddleBoxCfg -s GNSSCapability 1
+
+# All features (NowPlaying + GPS + Navigation)
+riddleBoxCfg -s DashboardInfo 7
+riddleBoxCfg -s GNSSCapability 1
+
+# After changing, delete cached engines and reboot:
+rm -f /etc/RiddleBoxData/AIEIPIEREngines.datastore
+busybox reboot
+```
+
+### DashBoard_DATA Message Format (0x2A) - Capture Verified Feb 2026
+
+When DashboardInfo bit 2 is set, the adapter sends navigation data to the host via message type 0x2A (DashBoard_DATA) containing JSON payloads.
+
+**Message Structure:**
+```
+Offset  Size  Field
+0x00    4     Magic (0x55AA55AA)
+0x04    4     Payload length (little-endian)
+0x08    4     Message type (0x0000002A)
+0x0C    4     Type inverse (0xFFFFFFD5)
+0x10    4     Subtype (0x000000C8 = 200 for NaviJSON)
+0x14    N     JSON payload (null-terminated)
+```
+
+**NaviJSON Payload Fields:**
+
+| Field | Type | Description | Example |
+|-------|------|-------------|---------|
+| `NaviStatus` | int | Navigation state: 0=inactive, 1=active, 2=calculating | `1` |
+| `NaviTimeToDestination` | int | ETA in seconds | `480` (8 minutes) |
+| `NaviDestinationName` | string | Destination name | `"Speedway"` |
+| `NaviDistanceToDestination` | int | Total distance in meters | `6124` |
+| `NaviAPPName` | string | Navigation app name | `"Apple Maps"` |
+| `NaviRemainDistance` | int | Distance to next maneuver (meters) | `26` |
+| `NaviRoadName` | string | Current/next road name | `"Farrior Dr"` |
+| `NaviOrderType` | int | Turn order in route | `1` |
+| `NaviManeuverType` | int | Maneuver type code | `11` (start) |
+
+**Example Payloads (from capture):**
+
+Route Status Update:
+```json
+{"NaviStatus":1,"NaviTimeToDestination":480,"NaviDestinationName":"Speedway","NaviDistanceToDestination":6124,"NaviAPPName":"Apple Maps"}
+```
+
+Turn-by-Turn Maneuver:
+```json
+{"NaviRoadName":"Farrior Dr","NaviRoadName":"Start on Farrior Dr","NaviOrderType":1,"NaviManeuverType":11}
+```
+
+Distance Update:
+```json
+{"NaviRemainDistance":26}
+```
+
+**Data Flow (Capture Verified):**
+```
+iPhone (Apple Maps)
+    │
+    ├─► iAP2 StartRouteGuidanceUpdate (0x5200) ◄── Adapter requests TBT data
+    │
+    ├─► iAP2 RouteGuidanceUpdate (0x5201) ──────► Route status updates
+    │
+    └─► iAP2 RouteGuidanceManeuverUpdate (0x5202) ► Turn-by-turn instructions
+            │
+            ▼
+    Adapter (iAP2RouteGuidanceEngine)
+            │
+            ├─► _SendNaviJSON() ─── Converts iAP2 to JSON
+            │
+            ▼
+    USB Message Type 0x2A (DashBoard_DATA)
+            │
+            ▼
+    Host Application
+```
+
+**Adapter Log Evidence:**
+```
+[iAP2Engine] Enable iAP2 iAP2RouteGuidanceEngine Capability
+[iAP2Engine] Send_changes:StartRouteGuidanceUpdate(0x5200), msgLen: 18
+[CiAP2Session_CarPlay] Message from iPhone: 0x5201 RouteGuidanceUpdate
+[CiAP2Session_CarPlay] Message from iPhone: 0x5202 RouteGuidanceManeuverUpdate
+[iAP2RouteGuidanceEngine] use ManeuverDescription as roadName: Start on Farrior Dr
+[iAP2RouteGuidanceEngine] _SendNaviJSON:
+```
+
+**Requirements for Navigation Data:**
+1. Set `DashboardInfo` with bit 2 enabled (value 4, 5, 6, or 7)
+2. iPhone must have active navigation in Apple Maps (or compatible app)
+3. Adapter must successfully complete iAP2 identification with RouteGuidance capability
+4. Host receives 0x2A messages with JSON navigation payloads
 
 ### GPS Data Format
 
@@ -388,12 +558,12 @@ echo 1 >/sys/class/gpio/gpio7/value   # Slow mode (default)
 ### AdvancedFeatures
 **Type:** Toggle (0/1) | **Default:** 0
 
-**⚠️ Unknown Effect:** The exact purpose of this setting has not been determined through testing. Previous documentation suggested it enables navigation video, but testing shows navigation video works independently of this setting (see One-Time Activation Behavior below).
+**Purpose:** Enables navigation video (CarPlay Dashboard) feature with one-time activation behavior.
 
 | Value | Effect |
 |-------|--------|
-| 0 (default) | Unknown |
-| 1 | Unknown |
+| 0 (default) | Navigation video disabled (unless previously activated) |
+| 1 | Navigation video enabled, feature unlocked permanently |
 
 **How to Set:**
 ```bash
@@ -401,21 +571,82 @@ echo 1 >/sys/class/gpio/gpio7/value   # Slow mode (default)
 /usr/sbin/riddleBoxCfg --upConfig
 ```
 
-**Observed Behavior:** When set to 1, the adapter will:
-1. Advertise `"supportFeatures":"naviScreen"` in boxInfo JSON
-2. Process `naviScreenInfo` from incoming BoxSettings
+**When Set to 1:**
+1. Adapter advertises `"supportFeatures":"naviScreen"` in boxInfo JSON
+2. Adapter processes `naviScreenInfo` from incoming BoxSettings
+3. Navigation video (Type 0x2C) becomes available
 
-**Note:** Navigation video (Type 0x2C) has been observed to work regardless of this setting's current value once it has been enabled at least once.
+---
 
-**One-Time Activation Behavior (Jan 2026 Discovery):**
+### Navigation Video Activation (Binary Verified Feb 2026)
+
+The firmware has **two independent paths** to activate navigation video. Either path can work independently:
+
+**Path A: naviScreenInfo in BoxSettings (BYPASSES AdvancedFeatures check)**
+
+If the host sends `naviScreenInfo` in BoxSettings JSON:
+```json
+{
+  "naviScreenInfo": {
+    "width": 480,
+    "height": 240,
+    "fps": 30
+  }
+}
+```
+
+The firmware:
+1. Parses naviScreenInfo at 0x16e5c
+2. **Immediately branches** to HU_SCREEN_INFO path (0x170d6)
+3. Sends D-Bus signal `HU_SCREEN_INFO` with resolution data
+4. Navigation video becomes available via Type 0x2C (AltVideoFrame)
+
+**Binary Evidence (ARMadb-driver_2025.10_unpacked):**
+```asm
+0x16e5c  blx fcn.00015228              ; Parse JSON for "naviScreenInfo"
+0x16e62  cmp r0, 0                     ; Check if key found
+0x16e64  bne.w 0x170d6                 ; If FOUND → HU_SCREEN_INFO path (BYPASS)
+0x16e68  ldr r0, "AdvancedFeatures"    ; Only reached if naviScreenInfo NOT found
+0x16e6c  bl fcn.00066d3c               ; Read config value
+0x16e70  cmp r0, 0                     ; Check AdvancedFeatures
+0x16e72  bne 0x16f20                   ; If ≠ 0 → HU_NAVISCREEN_INFO path
+0x16e7c  add r2, pc, "Not support NaviScreenInfo, return\n"
+```
+
+**Path B: AdvancedFeatures=1 (Fallback for legacy config)**
+
+If `naviScreenInfo` is NOT provided in BoxSettings:
+1. Firmware checks `AdvancedFeatures` config at 0x16e70
+2. If AdvancedFeatures=1 → sends HU_NAVISCREEN_INFO D-Bus signal
+3. Uses legacy naviScreenWidth/naviScreenHeight/naviScreenFPS from riddle.conf
+4. Navigation video becomes available
+
+**Activation Matrix:**
+
+| naviScreenInfo in BoxSettings | AdvancedFeatures | Result |
+|------------------------------|------------------|--------|
+| Yes (any resolution) | 0 | ✅ **WORKS** (HU_SCREEN_INFO path) |
+| Yes (any resolution) | 1 | ✅ Works (same HU_SCREEN_INFO path) |
+| No | 1 | ✅ Works (HU_NAVISCREEN_INFO path) |
+| No | 0 | ❌ Rejected ("Not support NaviScreenInfo") |
+
+**Key Insight:** The `bne.w 0x170d6` at 0x16e64 is the critical branch that **bypasses** the AdvancedFeatures check entirely when naviScreenInfo is present.
+
+---
+
+### AdvancedFeatures One-Time Activation (Legacy Behavior)
+
+When using AdvancedFeatures (Path B), there is a one-time activation quirk:
 
 | Scenario | Navigation Video | Notes |
 |----------|------------------|-------|
-| Fresh adapter, AdvancedFeatures=0 (never set to 1) | **NOT working** | Feature locked |
+| Fresh adapter, AdvancedFeatures=0 (never set to 1) | **NOT working** | Feature locked (if no naviScreenInfo sent) |
 | Set AdvancedFeatures=1, connect phone | **Working** | Feature activated |
 | Set back to AdvancedFeatures=0 | **STILL working** | Feature remains unlocked |
 
-Once AdvancedFeatures has been set to `1` at least once, navigation video continues to work even if the value is changed back to `0`. This suggests per-device memory or a persistent unlock flag.
+This suggests a persistent unlock flag is set on first activation.
+
+**Note:** This quirk does NOT apply when using Path A (naviScreenInfo in BoxSettings) - that path works regardless of AdvancedFeatures history.
 
 ### naviScreenWidth
 **Type:** Number (0-4096) | **Default:** 480
@@ -428,9 +659,16 @@ Navigation screen width in pixels.
 Navigation screen height in pixels.
 
 ### naviScreenFPS
-**Type:** Number (0-60) | **Default:** 30
+**Type:** Number (10-60) | **Default:** 30
 
 Navigation video frame rate.
+
+**Tested Range:**
+- **Maximum:** 60 FPS (hardware limit)
+- **Minimum usable:** 10 FPS (below this, UI refresh is noticeably degraded)
+- **Recommended:** 24-60 FPS for acceptable user experience
+
+**Note:** While the adapter accepts values down to 10 FPS, testing showed UI responsiveness becomes unacceptable below this threshold. Target 24-60 FPS for production use.
 
 ### naviScreenInfo BoxSettings Configuration
 
@@ -440,15 +678,17 @@ Host applications configure navigation video via BoxSettings JSON:
   "naviScreenInfo": {
     "width": 480,
     "height": 272,
-    "fps": 30
+    "fps": 30  // Range: 10-60, Recommended: 24-60
   }
 }
 ```
 
-**Requirements:**
-1. `AdvancedFeatures=1` must be set in riddle.conf
+**Requirements (when using naviScreenInfo Path A):**
+1. Host must send `naviScreenInfo` in BoxSettings (0x19) JSON
 2. Host must implement Command 508 handshake
 3. Host must handle NaviVideoData (Type 0x2C) messages
+
+**Note:** When `naviScreenInfo` is present in BoxSettings, it **bypasses** the AdvancedFeatures check entirely. The firmware branches directly to the HU_SCREEN_INFO path. See "Navigation Video Activation" section above for the binary-verified control flow.
 
 ---
 
@@ -835,9 +1075,85 @@ riddleBoxCfg -d list listkey listvalue                 : delete a list key's val
 
 ---
 
+## Configuration Setting Mechanisms
+
+Each riddle.conf parameter can be set through different mechanisms. Understanding these helps determine how to modify settings:
+
+### Setting Mechanisms
+
+| Mechanism | Description | When Used |
+|-----------|-------------|-----------|
+| **Host App (0x19)** | BoxSettings JSON sent via USB message type 0x19 | Host app (pi-carplay, AutoKit) sends config during session |
+| **riddleBoxCfg CLI** | Command-line tool on adapter: `riddleBoxCfg -s Key Value` | SSH access, scripts, OEM provisioning |
+| **Auto (Connect)** | Firmware sets automatically when device connects | DevList, LastConnectedDevice, LastPhoneSpsPps |
+| **Auto (Pair)** | Firmware sets automatically during Bluetooth pairing | DevList entries, PHONE_INFO |
+| **Auto (Runtime)** | Firmware manages internally during operation | LastBoxUIType, CarDate |
+| **OEM Default** | Set in riddle_default.conf during manufacturing | Brand*, USB*, oemName |
+
+### BoxSettings JSON → riddle.conf Mapping
+
+When host app sends BoxSettings (0x19), these JSON fields map to config keys:
+
+| BoxSettings JSON | riddle.conf Key | Notes |
+|------------------|-----------------|-------|
+| `mediaDelay` | MediaLatency | Audio buffer (ms) |
+| `autoConn` | NeedAutoConnect | Auto-reconnect toggle |
+| `autoPlay` | AutoPlauMusic | Auto-start playback |
+| `autoDisplay` | autoDisplay | Auto display mode |
+| `bgMode` | BackgroundMode | Background mode |
+| `startDelay` | BoxConfig_DelayStart | Startup delay |
+| `lang` | BoxConfig_UI_Lang | UI language |
+| `androidAutoSizeW` | AndroidAutoWidth | AA resolution |
+| `androidAutoSizeH` | AndroidAutoHeight | AA resolution |
+| `screenPhysicalW` | ScreenPhysicalW | Physical size (mm) |
+| `screenPhysicalH` | ScreenPhysicalH | Physical size (mm) |
+| `drivePosition` | CarDrivePosition | 0=LHD, 1=RHD |
+| `mediaSound` | MediaQuality | 0=44.1kHz, 1=48kHz |
+| `echoDelay` | EchoLatency | Echo cancellation |
+| `callQuality` | CallQuality | **BUGGY** - translation fails |
+| `wifiName` | CustomWifiName | WiFi SSID |
+| `WiFiChannel` | WiFiChannel | WiFi channel |
+| `btName` | CustomBluetoothName | Bluetooth name |
+| `boxName` | CustomBoxName | Display name |
+| `iAP2TransMode` | iAP2TransMode | Transport mode |
+| `androidWorkMode` | AndroidWorkMode | AA daemon mode |
+
+### Auto-Set Parameters (Firmware Managed)
+
+These are set automatically by firmware - do not set manually:
+
+| Key | Set When | Description |
+|-----|----------|-------------|
+| DevList | Device pairs via Bluetooth | Adds device entry |
+| DeletedDevList | User removes device | Prevents auto-reconnect |
+| LastConnectedDevice | Session starts | MAC of current device |
+| LastPhoneSpsPps | Video stream starts | Cached H.264 SPS/PPS |
+| LastBoxUIType | UI mode changes | CarPlay/AA/HiCar state |
+| CarDate | Unknown | Date code |
+
+### Internal Parameters (Not User-Settable via Host App)
+
+These require `riddleBoxCfg` CLI or are firmware-only:
+
+| Key | How to Set | Notes |
+|-----|------------|-------|
+| DashboardInfo | `riddleBoxCfg -s DashboardInfo 7` | iAP2 engine bitmask |
+| GNSSCapability | `riddleBoxCfg -s GNSSCapability 1` | Required for LocationEngine |
+| AdvancedFeatures | `riddleBoxCfg -s AdvancedFeatures 1` | Hidden features toggle |
+| SpsPpsMode | `riddleBoxCfg -s SpsPpsMode 1` | H.264 handling mode |
+| SendHeartBeat | `riddleBoxCfg -s SendHeartBeat 1` | Heartbeat toggle |
+| LogMode | `riddleBoxCfg -s LogMode 1` | Logging toggle |
+
+---
+
 ## Authoritative Parameter List (from --info)
 
 Output from `/usr/sbin/riddleBoxCfg --info` on CPC200-CCPA firmware. This is the **definitive source** for all configuration parameters.
+
+**Source Column Legend:**
+- **Web UI** = Set via Host App BoxSettings (0x19) JSON
+- **Protocol Init** = Set via Host App during session initialization
+- **Internal** = Firmware-managed or riddleBoxCfg CLI only
 
 ### Integer Parameters
 
@@ -927,6 +1243,7 @@ Output from `/usr/sbin/riddleBoxCfg --info` on CPC200-CCPA firmware. This is the
 | WifiName | "" | 0 | 15 | Web UI |
 | CustomBluetoothName | "" | 0 | 15 | Web UI |
 | CustomWifiName | "" | 0 | 15 | Web UI |
+| HU_BT_PIN_CODE | "" | 0 | 6 | Internal - BT pairing PIN (see note) |
 | LastPhoneSpsPps | "" | 0 | 511 | Internal |
 | CustomId | "" | 0 | 31 | Internal |
 | LastConnectedDevice | "" | 0 | 17 | Internal |
@@ -944,6 +1261,73 @@ Output from `/usr/sbin/riddleBoxCfg --info` on CPC200-CCPA firmware. This is the
 | USBVID | "" | 0 | 4 | Web UI |
 | USBSerial | "" | 0 | 63 | Internal |
 | oemName | "" | 0 | 63 | Internal |
+
+### Array/Object Parameters
+
+| Key | Type | Description |
+|-----|------|-------------|
+| DevList | Array | Paired devices list |
+| DeletedDevList | Array | Removed/unpaired devices list |
+
+#### DevList Structure
+
+Stores all paired Bluetooth devices. Each entry is an object with the following fields:
+
+```json
+{
+  "DevList": [
+    {
+      "id": "64:31:35:8C:29:69",
+      "type": "CarPlay",
+      "name": "Luis",
+      "index": "1",
+      "time": "2026-02-03 17:51:25",
+      "rfcomm": "1"
+    }
+  ]
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string | Bluetooth MAC address (XX:XX:XX:XX:XX:XX format) |
+| `type` | string | Connection type: `"CarPlay"`, `"AndroidAuto"`, `"HiCar"` |
+| `name` | string | Device friendly name (from phone) |
+| `index` | string | Device index in list (starts at "1") |
+| `time` | string | Last connection timestamp (YYYY-MM-DD HH:MM:SS) |
+| `rfcomm` | string | RFCOMM channel number |
+
+**Behavior:**
+- Populated automatically when devices pair via Bluetooth
+- Used for auto-reconnect feature (`NeedAutoConnect=1`)
+- `LastConnectedDevice` references an `id` from this list
+- Maximum entries: ~10 devices (older entries may be pruned)
+- Survives factory reset if Bluetooth pairing data persists
+
+#### DeletedDevList Structure
+
+Stores devices that were explicitly unpaired/removed by user:
+
+```json
+{
+  "DeletedDevList": [
+    {
+      "id": "AA:BB:CC:DD:EE:FF",
+      "type": "CarPlay"
+    }
+  ]
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string | Bluetooth MAC address of removed device |
+| `type` | string | Connection type that was removed |
+
+**Behavior:**
+- Prevents auto-reconnect to intentionally removed devices
+- Device must be re-paired manually to reconnect
+- Cleared on factory reset
 
 ---
 
@@ -1092,8 +1476,292 @@ The `--restoreOld` command restores the previous configuration state, useful whe
 
 ---
 
+## Host App vs Direct Access Configuration (Binary Verified Feb 2026)
+
+This section documents which configuration keys can be set via USB protocol messages from a host application versus those requiring direct adapter access (terminal/SSH, web interface, or riddleCfg CLI).
+
+**Analysis Source:** Binary analysis of `riddleBoxCfg_unpacked` and `ARMadb-driver_2025.10_unpacked`
+
+### Summary
+
+| Access Method | Key Count | Percentage |
+|---------------|-----------|------------|
+| Host App (USB Protocol) | ~19 keys | 18% |
+| Direct Access Only | ~68 keys | 64% |
+| Read-Only | ~19 keys | 18% |
+
+---
+
+### Host App Configurable Keys (USB Protocol)
+
+#### Via Open Message (0x01) - Session Parameters
+
+| Key | Protocol Field | Effect |
+|-----|----------------|--------|
+| VideoResolutionWidth | width (bytes 0-3) | Video encoder width |
+| VideoResolutionHeight | height (bytes 4-7) | Video encoder height |
+| CustomFrameRate | fps (bytes 8-11) | Video framerate |
+| ScreenDPI | Sent via SendFile (0x99) | UI scaling |
+| DisplaySize | Derived from resolution | UI density |
+
+#### Via BoxSettings Message (0x19) - JSON Configuration
+
+| Key | JSON Field | Effect |
+|-----|------------|--------|
+| mediaDelay | "mediaDelay" | Audio delay compensation |
+| MediaQuality | "mediaSound" | 0=44.1kHz, 1=48kHz |
+| CallQuality | "callQuality" | 0=normal, 1=clear, 2=HD |
+| WiFiChannel | "WiFiChannel" / "wifiChannel" | WiFi AP channel |
+| CustomWifiName | "wifiName" | WiFi SSID |
+| CustomBluetoothName | "btName" | Bluetooth name |
+| CustomBoxName | "boxName" / "OemName" | Device name |
+| NeedAutoConnect | "autoConn" | Auto-connect enable |
+| AutoPlauMusic | "autoPlay" | Auto-play on connect |
+| AndroidAutoWidth | "androidAutoSizeW" | AA video width |
+| AndroidAutoHeight | "androidAutoSizeH" | AA video height |
+
+#### Via Command Message (0x08) - Runtime Control
+
+| Key Affected | Command ID | Effect |
+|--------------|------------|--------|
+| MicType | 7 (UseCarMic), 8 (UseBoxMic), 15 (I2S), 21 (Phone) | Mic source |
+| DayNightMode | 16 (StartNightMode), 17 (StopNightMode) | Theme |
+| BtAudio | 22 (UseBluetoothAudio), 23 (UseBoxTransAudio) | Audio routing |
+| WiFiChannel | 24 (Use24GWiFi), 25 (Use5GWiFi) | WiFi band (not specific channel) |
+| GNSSCapability | 18 (StartGNSSReport), 19 (StopGNSSReport) | GPS forwarding |
+| NeedKeyFrame | 12 (RequestKeyFrame) | Video IDR request |
+| NeedAutoConnect | 1001 (SupportAutoConnect), 1002 (StartAutoConnect) | Auto-connect |
+
+#### Via SendFile Message (0x99) - File Writes
+
+| Key | File Path | Effect |
+|-----|-----------|--------|
+| ScreenDPI | /tmp/screen_dpi | DPI value |
+| DayNightMode | /tmp/night_mode | Theme state (0/1) |
+| CarDrivePosition | /tmp/hand_drive_mode | LHD/RHD |
+| ChargeMode | /tmp/charge_mode | Charging behavior |
+| CustomBoxName | /etc/box_name | Device name |
+| AirPlay config | /etc/airplay.conf | AirPlay settings |
+| AndroidWorkMode | /etc/android_work_mode | AA daemon enable |
+| CustomCarLogo | /etc/icon_*.png | Logo images |
+
+---
+
+### Direct Access Only Keys (Terminal/Web/riddleCfg)
+
+#### USB Hardware Configuration
+
+| Key | Why Direct Access Required |
+|-----|---------------------------|
+| USBVID | Changes USB device identity - requires gadget driver reconfigure |
+| USBPID | Changes USB device identity - requires gadget driver reconfigure |
+| USBProduct | USB descriptor - set at driver init |
+| USBManufacturer | USB descriptor - set at driver init |
+| USBSerial | USB descriptor - set at driver init |
+| USBConnectedMode | Low-level USB mode |
+| USBTransMode | Transfer mode (bulk/isoch) |
+| AutoResetUSB | USB error recovery behavior |
+
+#### Video Processing (Internal Encoder Settings)
+
+| Key | Why Direct Access Required |
+|-----|---------------------------|
+| VideoBitRate | Encoder parameter - not in protocol |
+| BoxConfig_preferSPSPPSType | Codec config |
+| SpsPpsMode | Codec config |
+| LastPhoneSpsPps | Cached value |
+| RepeatKeyframe | Encoder behavior |
+| SendEmptyFrame | Encoder behavior |
+| NotCarPlayH264DecreaseMode | Quality reduction policy |
+| ImprovedFluency | Buffering behavior |
+
+#### Audio Processing (Internal Mixer Settings)
+
+| Key | Why Direct Access Required |
+|-----|---------------------------|
+| MediaLatency | Internal buffer size |
+| MediaPacketLen | Packet configuration |
+| VoiceQuality | Audio processing |
+| MicMode | Processing mode |
+| MicGainSwitch | Gain control |
+| NaviAudio | Channel routing |
+| NaviVolume | Volume level |
+| TtsPacketLen | TTS config |
+| TtsVolumGain | TTS gain |
+| VrPacketLen | Voice recognition config |
+| VrVolumGain | Voice recognition gain |
+| EchoLatency | Echo cancellation |
+| DuckPosition | Ducking level |
+| AudioMultiBusMode | Multi-channel mode |
+
+#### WiFi/Bluetooth Hardware
+
+| Key | Why Direct Access Required |
+|-----|---------------------------|
+| WifiPassword | Security - not sent over USB |
+| WiFiP2PMode | Network mode change |
+| InternetHotspots | Network routing |
+| BrandWifiName | OEM config |
+| BrandWifiChannel | OEM config |
+| BrandBluetoothName | OEM config |
+| UseBTPhone | Audio routing config |
+| UseUartBLE | Hardware interface |
+| HU_BT_PIN_CODE | BT pairing PIN config |
+
+**HU_BT_PIN_CODE Note:**
+This key stores the Bluetooth pairing PIN code used by the adapter. Related to two USB message types:
+- **Type 0x0C (CMD_SET_BLUETOOTH_PIN_CODE):** Sets this configuration value
+- **Type 0x2B (Connection_PINCODE):** Real-time PIN notification during active pairing
+See `usb_protocol.md` → "Bluetooth PIN Message Types" for detailed flow.
+
+#### System/Behavior (Feature Gating)
+
+| Key | Why Direct Access Required |
+|-----|---------------------------|
+| **AdvancedFeatures** | **Critical: Enables nav screen (0x2C) - requires adapter restart** |
+| AutoUpdate | Firmware update policy |
+| IgnoreUpdateVersion | Update skip |
+| BackgroundMode | Background operation |
+| BackRecording | DVR recording |
+| BoxConfig_DelayStart | Boot timing |
+| BoxConfig_UI_Lang | UI language |
+| FastConnect | Handshake behavior |
+| SendHeartBeat | Heartbeat enable/disable |
+| KnobMode | Input mapping |
+| MouseMode | Input mode |
+| ReturnMode | Button behavior |
+| LogMode | Debug level |
+
+#### OEM/Branding (Factory Settings)
+
+| Key | Why Direct Access Required |
+|-----|---------------------------|
+| BrandName | OEM identity |
+| BrandServiceURL | OEM service |
+| CustomId | OEM tracking |
+| LogoType | Logo selection |
+| BoxSupportArea | Regional config |
+| ResetBoxCarLogo | Factory reset trigger |
+| ResetBoxConfig | Factory reset trigger |
+
+---
+
+### Read-Only Keys (Set by Adapter or Phone)
+
+#### Set by Adapter (Hardware/Firmware Info)
+
+| Key | Source |
+|-----|--------|
+| RiddlePlatform | Hardware detection |
+| uuid | Generated/stored in /etc/uuid |
+| hwVersion | /etc/box_version |
+| software_version | /etc/software_version |
+
+#### Set by Connected Phone (Session Info)
+
+| Key | Source | When Set |
+|-----|--------|----------|
+| PHONE_INFO | Phone during iAP2/AA handshake | Session start |
+| PHONE_DEVICE_TYPE | Phone identification | Session start |
+| PHONE_OS_VERSION | Phone OS version | Session start |
+| PHONE_LINK_TYPE | Active link type | Session start |
+| BT_CONNECTING_ADDR | Bluetooth MAC | During BT connect |
+| LastPhoneSpsPps | Phone's H.264 params | Video negotiation |
+| conNum | Connection statistics | Session end |
+| conRate | Connection success rate | Session end |
+| conSpd | Connection speed | Session end |
+| linkT | Link type string | Session end |
+| MD_LINK_TIME | Link timestamp | Session end |
+
+#### Set by Host App (Reported to Adapter)
+
+| Key | Source | Protocol |
+|-----|--------|----------|
+| APP_INFO | Host app info blob | BoxSettings (0x19) |
+| HU_TYPE_ID | Host identifier | Open (0x01) |
+| HU_TYPE_OS | Host OS type | Open (0x01) |
+| HU_OS_VERSION | Host OS version | BoxSettings (0x19) |
+| HU_APP_VERSION | Host app version | BoxSettings (0x19) |
+| HU_SCREEN_INFO | Host screen info | Open (0x01) |
+| HU_LINK_TYPE | Host link type | Session info |
+
+---
+
+### Critical Note: Navigation Video Configuration
+
+There are **two independent paths** to enable navigation video (see "Navigation Video Activation" section for binary-verified details):
+
+**Path A: naviScreenInfo in BoxSettings (Host App Controlled)**
+- Host sends `naviScreenInfo: {width, height, fps}` in BoxSettings JSON
+- Firmware at 0x16e64 detects naviScreenInfo and **bypasses** the AdvancedFeatures check
+- Uses HU_SCREEN_INFO D-Bus path
+- ✅ **Works without AdvancedFeatures=1**
+
+**Path B: AdvancedFeatures=1 (Legacy, Direct Access Only)**
+- Set via `riddleBoxCfg -s AdvancedFeatures 1` (SSH/terminal only)
+- Uses HU_NAVISCREEN_INFO D-Bus path
+- Uses naviScreenWidth/naviScreenHeight/naviScreenFPS from riddle.conf
+- Required only if host does NOT send naviScreenInfo in BoxSettings
+
+**AdvancedFeatures Effects (when set to 1):**
+- Adapter advertises `"supportFeatures": "naviScreen"` in boxInfo
+- Enables HU_NAVISCREEN_INFO D-Bus signal (fallback path)
+- Enables HU_NEEDNAVI_STREAM requests
+- Enables RequestNaviScreenFoucs/ReleaseNaviScreenFoucs commands
+- Enables NaviVideoData (0x2C) message handling
+
+**Recommended Flow (Host App - Path A):**
+1. Host sends BoxSettings with `naviScreenInfo: {width, height, fps}`
+2. Firmware branches to HU_SCREEN_INFO path (bypasses AdvancedFeatures)
+3. iPhone and adapter negotiate navigation support
+4. NaviVideoData (0x2C) flows from iPhone → Adapter → Host
+
+**Legacy Flow (Path B - requires SSH access):**
+1. Set `AdvancedFeatures=1` via SSH/terminal (one-time, direct access)
+2. Reboot or restart ARMadb-driver
+3. Host does NOT send naviScreenInfo
+4. Firmware uses legacy naviScreen* settings from riddle.conf
+
+---
+
+### Host App Configuration Workflow
+
+```
+Session Initialization (Host → Adapter):
+
+1. Send Open (0x01)
+   - width, height, fps, format, iBoxVersion, phoneWorkMode
+
+2. Send BoxSettings (0x19) JSON
+   - mediaDelay, mediaSound, callQuality, WiFiChannel
+   - wifiName, btName, boxName, autoConn, autoPlay
+   - androidAutoSizeW, androidAutoSizeH, syncTime
+
+3. Send Commands (0x08) as needed
+   - MicType: 7/8/15/21
+   - NightMode: 16/17
+   - WiFiBand: 24/25
+   - GNSS: 18/19
+
+4. Send Files (0x99) as needed
+   - /tmp/screen_dpi
+   - /etc/airplay.conf
+   - /etc/android_work_mode
+   - /etc/icon_*.png
+
+Runtime Configuration Changes:
+- Theme change: Send Command 16 or 17
+- Mic change: Send Command 7, 8, 15, or 21
+- WiFi band: Send Command 24 or 25
+- Sample rate/Call quality: Resend full BoxSettings (0x19)
+```
+
+---
+
 ## References
 
 - Source: `pi-carplay-4.1.3/firmware_binaries/CONFIG_KEYS_REFERENCE.md`
 - Source: `carlink_native/documents/reference/Firmware/firmware_configurables.md`
-- Firmware strings analyzed using: `strings -t x`, `objdump -d`
+- Source: Binary analysis of `riddleBoxCfg_unpacked` (49KB, 2025.10 firmware)
+- Source: Binary analysis of `ARMadb-driver_2025.10_unpacked` (478KB)
+- Firmware strings analyzed using: `strings -t x`, `objdump -d`, `radare2`

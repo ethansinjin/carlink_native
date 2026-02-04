@@ -24,6 +24,27 @@ object AudioStreamType {
 }
 
 /**
+ * Active stream type for AAOS volume group routing.
+ *
+ * The CPC200-CCPA protocol sends Media, Siri, Phone Call, and Alert audio ALL with
+ * audio_type=1 (MAIN). Only Navigation uses audio_type=2. This enum tracks the semantic
+ * stream type based on protocol commands (SIRI_START, PHONECALL_START, etc.) to route
+ * audio_type=1 packets to the correct AudioTrack with proper USAGE attributes.
+ *
+ * AAOS Volume Group Mapping:
+ * - MEDIA → USAGE_MEDIA → "Audio" volume
+ * - SIRI → USAGE_ASSISTANT → "Assistant" volume
+ * - PHONE_CALL → USAGE_VOICE_COMMUNICATION → "Phone" volume
+ * - ALERT → USAGE_MEDIA → "Audio" volume (could use USAGE_NOTIFICATION_EVENT)
+ */
+enum class ActiveStreamType {
+    MEDIA,      // Default - music, podcasts (USAGE_MEDIA)
+    SIRI,       // Voice assistant response (USAGE_ASSISTANT)
+    PHONE_CALL, // Phone call audio (USAGE_VOICE_COMMUNICATION)
+    ALERT       // System alerts, ringtones (USAGE_MEDIA)
+}
+
+/**
  * DualStreamAudioManager - Handles multiple audio streams with AAOS CarAudioContext integration.
  *
  * PURPOSE:
@@ -145,6 +166,10 @@ class DualStreamAudioManager(
     @Volatile private var voiceStarted = false
 
     @Volatile private var callStarted = false
+
+    // Active stream type for routing audio_type=1 packets to correct AudioTrack
+    // Updated via setActiveStreamType() when protocol commands arrive
+    @Volatile private var activeStreamType = ActiveStreamType.MEDIA
 
     private val lock = Any()
 
@@ -367,8 +392,23 @@ class DualStreamAudioManager(
         // Route to AAOS CarAudioContext (USAGE mappings in class KDoc)
         return when (audioType) {
             AudioStreamType.MEDIA -> {
-                ensureMediaTrack(decodeType)
-                mediaBuffer?.write(data) ?: -1
+                // audio_type=1 carries Media, Siri, Phone, Alert
+                // Route based on active stream type from protocol commands
+                when (activeStreamType) {
+                    ActiveStreamType.SIRI -> {
+                        ensureVoiceTrack(decodeType)
+                        voiceBuffer?.write(data) ?: -1
+                    }
+                    ActiveStreamType.PHONE_CALL -> {
+                        ensureCallTrack(decodeType)
+                        callBuffer?.write(data) ?: -1
+                    }
+                    else -> {
+                        // MEDIA and ALERT use media track
+                        ensureMediaTrack(decodeType)
+                        mediaBuffer?.write(data) ?: -1
+                    }
+                }
             }
 
             AudioStreamType.NAVIGATION -> {
@@ -515,6 +555,7 @@ class DualStreamAudioManager(
                 "navEndMarkersDetected" to navEndMarkersDetected,
                 "navWarmupFramesSkipped" to navWarmupFramesSkipped,
                 "zeroPacketsFiltered" to zeroPacketsFiltered,
+                "activeStreamType" to activeStreamType.name,
             )
         }
     }
@@ -655,56 +696,30 @@ class DualStreamAudioManager(
         }
     }
 
-    /** Pause tracks without release (USB hiccups). Prevents Session 1 pipeline resets. */
-    fun suspendPlayback() {
-        synchronized(lock) {
-            log("[AUDIO] Suspending playback (retaining tracks)")
+    // ========== Active Stream Type Management ==========
+    //
+    // The CPC200-CCPA protocol sends audio_type=1 for Media, Siri, Phone, and Alert audio.
+    // These methods track the semantic stream type based on protocol commands to route
+    // audio to the correct AudioTrack with proper AAOS USAGE attributes.
 
-            mediaTrack?.let { track ->
-                if (track.playState == AudioTrack.PLAYSTATE_PLAYING) {
-                    track.pause()
-                }
-            }
-            navTrack?.let { track ->
-                if (track.playState == AudioTrack.PLAYSTATE_PLAYING) {
-                    track.pause()
-                }
-            }
-            voiceTrack?.let { track ->
-                if (track.playState == AudioTrack.PLAYSTATE_PLAYING) {
-                    track.pause()
-                }
-            }
-            callTrack?.let { track ->
-                if (track.playState == AudioTrack.PLAYSTATE_PLAYING) {
-                    track.pause()
-                }
-            }
-
-            // Reset pre-fill for smooth resume
-            mediaStarted = false
-            navStarted = false
-            voiceStarted = false
-            callStarted = false
-
-            log("[AUDIO] Playback suspended - tracks paused but retained")
+    /**
+     * Set active stream type for routing audio_type=1 packets.
+     * Called from CarlinkManager.handleAudioCommand() when commands arrive.
+     *
+     * @param type The semantic stream type (MEDIA, SIRI, PHONE_CALL, ALERT)
+     */
+    fun setActiveStreamType(type: ActiveStreamType) {
+        val previous = activeStreamType
+        activeStreamType = type
+        if (previous != type) {
+            log("[AUDIO] Stream type: ${previous.name} -> ${type.name}")
         }
     }
 
-    /** Resume playback after suspension. Tracks auto-resume via ensureXxxTrack on data. */
-    fun resumePlayback() {
-        synchronized(lock) {
-            log("[AUDIO] Resuming playback")
-            val states =
-                listOf(
-                    "media=${mediaTrack?.playState ?: "null"}",
-                    "nav=${navTrack?.playState ?: "null"}",
-                    "voice=${voiceTrack?.playState ?: "null"}",
-                    "call=${callTrack?.playState ?: "null"}",
-                )
-            log("[AUDIO] Track states: ${states.joinToString(", ")}")
-        }
-    }
+    /**
+     * Get current active stream type.
+     */
+    fun getActiveStreamType(): ActiveStreamType = activeStreamType
 
     /** Stop playback and release all resources. */
     fun release() {
@@ -733,6 +748,8 @@ class DualStreamAudioManager(
             navBuffer = null
             voiceBuffer = null
             callBuffer = null
+
+            activeStreamType = ActiveStreamType.MEDIA
 
             log("[AUDIO] DualStreamAudioManager released")
         }

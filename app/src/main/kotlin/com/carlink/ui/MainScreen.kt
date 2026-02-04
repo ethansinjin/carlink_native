@@ -2,7 +2,6 @@ package com.carlink.ui
 
 import android.view.MotionEvent
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
@@ -25,19 +24,15 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -51,11 +46,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.carlink.BuildConfig
 import com.carlink.CarlinkManager
 import com.carlink.R
-import com.carlink.capture.CapturePlaybackManager
 import com.carlink.logging.logDebug
 import com.carlink.logging.logInfo
 import com.carlink.protocol.MessageSerializer
@@ -63,9 +56,7 @@ import com.carlink.protocol.MultiTouchAction
 import com.carlink.ui.components.LoadingSpinner
 import com.carlink.ui.components.VideoSurface
 import com.carlink.ui.components.rememberVideoSurfaceState
-import com.carlink.ui.settings.CapturePlaybackPreference
 import com.carlink.ui.settings.DisplayMode
-import com.carlink.ui.settings.formatDuration
 import com.carlink.ui.theme.AutomotiveDimens
 import kotlinx.coroutines.launch
 
@@ -73,59 +64,22 @@ import kotlinx.coroutines.launch
 @Composable
 fun MainScreen(
     carlinkManager: CarlinkManager,
-    capturePlaybackManager: CapturePlaybackManager,
     displayMode: DisplayMode,
     onNavigateToSettings: () -> Unit,
 ) {
-    val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
     var state by remember { mutableStateOf(CarlinkManager.State.DISCONNECTED) }
     var isResetting by remember { mutableStateOf(false) }
     val surfaceState = rememberVideoSurfaceState()
 
-    // Playback state
-    val playbackPreference = remember { CapturePlaybackPreference.getInstance(context) }
-    val playbackEnabled by playbackPreference.playbackEnabledFlow.collectAsStateWithLifecycle(
-        initialValue = false,
-    )
-    val playbackState by capturePlaybackManager.state.collectAsStateWithLifecycle()
-    val playbackProgress by capturePlaybackManager.progress.collectAsStateWithLifecycle()
-    val isPlaybackMode = playbackEnabled && playbackState != CapturePlaybackManager.State.IDLE
-
     LaunchedEffect(state) {
         logInfo("[UI_STATE] MainScreen connection state: $state", tag = "UI")
     }
 
-    LaunchedEffect(playbackState) {
-        logInfo("[UI_STATE] MainScreen playback state: $playbackState", tag = "UI")
-
-        // When playback completes or errors, clean up and navigate to settings
-        if (playbackState == CapturePlaybackManager.State.COMPLETED ||
-            playbackState == CapturePlaybackManager.State.ERROR
-        ) {
-            logInfo("[PLAYBACK] Playback ended - cleaning up and navigating to settings", tag = "UI")
-            // Same cleanup as Stop button
-            capturePlaybackManager.stopPlayback()
-            playbackPreference.setPlaybackEnabled(false)
-            carlinkManager.resetVideoDecoder()
-            carlinkManager.resumeAdapterMode()
-            onNavigateToSettings()
-        }
-    }
-
     var lastTouchTime by remember { mutableLongStateOf(0L) }
-    val isUserInteractingWithProjection = state == CarlinkManager.State.STREAMING && !isPlaybackMode
+    val isUserInteractingWithProjection = state == CarlinkManager.State.STREAMING
     val activeTouches = remember { mutableStateMapOf<Int, TouchPoint>() }
     var hasStartedConnection by remember { mutableStateOf(false) }
-
-    // Handle playback mode - start playback when ready (uses CarlinkManager's existing renderers)
-    LaunchedEffect(playbackState, carlinkManager.isRendererReady()) {
-        // If playback is ready and renderer is initialized, start playback
-        if (playbackState == CapturePlaybackManager.State.READY && carlinkManager.isRendererReady()) {
-            logInfo("[PLAYBACK] Starting playback via CarlinkManager injection", tag = "UI")
-            capturePlaybackManager.startPlayback()
-        }
-    }
 
     // Handle surface initialization for adapter
     LaunchedEffect(surfaceState.surface, surfaceState.width, surfaceState.height) {
@@ -135,11 +89,6 @@ fun MainScreen(
             // Force even dimensions for H.264 macroblock alignment
             val adapterWidth = surfaceState.width and 1.inv()
             val adapterHeight = surfaceState.height and 1.inv()
-
-            // Skip adapter initialization if playback is active
-            if (isPlaybackMode) {
-                return@let
-            }
 
             logInfo(
                 "[CARLINK_RESOLUTION] Sending to adapter: ${adapterWidth}x$adapterHeight " +
@@ -173,21 +122,7 @@ fun MainScreen(
         }
     }
 
-    // Clean up on dispose
-    DisposableEffect(Unit) {
-        onDispose {
-            // Playback now uses CarlinkManager's renderers, no separate cleanup needed
-        }
-    }
-
-    // In playback mode, show loading only when waiting for playback to start
-    // In live mode, show loading when not streaming
-    val isLoading = if (isPlaybackMode) {
-        playbackState == CapturePlaybackManager.State.LOADING
-    } else {
-        state != CarlinkManager.State.STREAMING
-    }
-    val isPlaybackPlaying = playbackState == CapturePlaybackManager.State.PLAYING
+    val isLoading = state != CarlinkManager.State.STREAMING
     val colorScheme = MaterialTheme.colorScheme
 
     val baseModifier = Modifier.fillMaxSize().background(Color.Black)
@@ -210,7 +145,6 @@ fun MainScreen(
             onSurfaceDestroyed = {
                 logInfo("[UI_SURFACE] Surface destroyed", tag = "UI")
                 surfaceState.onSurfaceDestroyed()
-                // Always notify CarlinkManager since playback uses its renderers
                 carlinkManager.onSurfaceDestroyed()
             },
             onSurfaceSizeChanged = { width, height ->
@@ -230,8 +164,8 @@ fun MainScreen(
             },
         )
 
-        // Loading overlay (only show when not in playback mode)
-        if (isLoading && !isPlaybackMode) {
+        // Loading overlay
+        if (isLoading) {
             Box(
                 modifier =
                     Modifier
@@ -266,7 +200,7 @@ fun MainScreen(
                                 CarlinkManager.State.STREAMING -> "[ Streaming ]"
                             },
                         style = MaterialTheme.typography.bodyLarge,
-                        color = colorScheme.onSurface,
+                        color = Color(0xFFDDE4E5), // Fixed light color for dark overlay
                     )
                 }
             }
@@ -356,105 +290,6 @@ fun MainScreen(
                         maxLines = 1,
                         overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                     )
-                }
-            }
-        }
-
-        // Playback overlay - always visible in upper-left during playback
-        AnimatedVisibility(
-            visible = isPlaybackMode,
-            modifier =
-                Modifier
-                    .align(Alignment.TopStart)
-                    .windowInsetsPadding(WindowInsets.systemBars)
-                    .windowInsetsPadding(WindowInsets.displayCutout)
-                    .padding(16.dp),
-            enter = fadeIn(),
-            exit = fadeOut(),
-        ) {
-            Box(
-                modifier =
-                    Modifier
-                        .background(
-                            color = colorScheme.surface.copy(alpha = 0.85f),
-                            shape = RoundedCornerShape(12.dp),
-                        )
-                        .padding(12.dp),
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    // Playback indicator
-                    Icon(
-                        imageVector = Icons.Default.PlayCircle,
-                        contentDescription = null,
-                        tint = colorScheme.primary,
-                        modifier = Modifier.size(24.dp),
-                    )
-
-                    // Progress
-                    Column {
-                        Text(
-                            text = "Capture Playback",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = colorScheme.onSurface,
-                        )
-                        Text(
-                            text = "${formatDuration(playbackProgress.currentMs)} / ${formatDuration(playbackProgress.totalMs)}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = colorScheme.onSurfaceVariant,
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.width(8.dp))
-
-                    // Settings button
-                    FilledTonalButton(
-                        onClick = { onNavigateToSettings() },
-                        modifier = Modifier.height(36.dp),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Settings,
-                            contentDescription = "Settings",
-                            modifier = Modifier.size(18.dp),
-                        )
-                    }
-
-                    // Stop button - disables playback mode entirely
-                    FilledTonalButton(
-                        onClick = {
-                            scope.launch {
-                                // Stop playback and disable playback mode
-                                capturePlaybackManager.stopPlayback()
-                                playbackPreference.setPlaybackEnabled(false)
-                                // Reset video decoder to flush buffers
-                                carlinkManager.resetVideoDecoder()
-                                // Resume adapter mode
-                                carlinkManager.resumeAdapterMode()
-                                logInfo("[PLAYBACK] Playback stopped by user - decoder reset, resuming adapter mode", tag = "UI")
-                            }
-                        },
-                        modifier = Modifier.height(36.dp),
-                        colors =
-                            ButtonDefaults.filledTonalButtonColors(
-                                containerColor = colorScheme.errorContainer,
-                                contentColor = colorScheme.onErrorContainer,
-                            ),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Stop,
-                            contentDescription = "Stop Playback",
-                            modifier = Modifier.size(18.dp),
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = "Stop",
-                            style = MaterialTheme.typography.labelMedium,
-                        )
-                    }
                 }
             }
         }

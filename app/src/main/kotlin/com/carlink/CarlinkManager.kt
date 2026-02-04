@@ -4,10 +4,9 @@ import android.content.Context
 import android.hardware.usb.UsbManager
 import android.os.PowerManager
 import android.view.Surface
-import android.net.Uri
+import com.carlink.audio.ActiveStreamType
 import com.carlink.audio.DualStreamAudioManager
 import com.carlink.audio.MicrophoneCaptureManager
-import com.carlink.capture.CaptureRecordingManager
 import com.carlink.logging.Logger
 import com.carlink.logging.logDebug
 import com.carlink.logging.logError
@@ -29,7 +28,6 @@ import com.carlink.protocol.Message
 import com.carlink.protocol.MessageSerializer
 import com.carlink.protocol.PhoneType
 import com.carlink.protocol.PluggedMessage
-import com.carlink.protocol.TouchAction
 import com.carlink.protocol.UnpluggedMessage
 import com.carlink.protocol.VideoDataMessage
 import com.carlink.protocol.VideoStreamingSignal
@@ -153,6 +151,11 @@ class CarlinkManager(
     private var videoInitialized = false // Track if video subsystem is ready for decoding
     private var lastVideoDiscardWarningTime = 0L // Throttle discard warnings
 
+    // Actual surface dimensions for touch normalization
+    // These may differ from config.width/height when user selects a custom resolution
+    private var actualSurfaceWidth: Int = 0
+    private var actualSurfaceHeight: Int = 0
+
     // Audio
     private var audioManager: DualStreamAudioManager? = null
     private var audioInitialized = false
@@ -179,10 +182,6 @@ class CarlinkManager(
 
     // MediaSession
     private var mediaSessionManager: MediaSessionManager? = null
-
-    // Capture Recording
-    private val captureRecordingManager = CaptureRecordingManager(context)
-    private var isRecordingConfigured = false
 
     // Timers
     private var pairTimeout: Timer? = null
@@ -249,6 +248,11 @@ class CarlinkManager(
         val evenWidth = surfaceWidth and 1.inv()
         val evenHeight = surfaceHeight and 1.inv()
 
+        // Store actual surface dimensions for touch normalization
+        // These represent the physical display area where touch events occur
+        actualSurfaceWidth = evenWidth
+        actualSurfaceHeight = evenHeight
+
         // Update config with actual surface dimensions
         // This ensures adapter is configured for the correct resolution based on actual layout
         // (with or without system bar insets depending on immersive mode)
@@ -300,6 +304,9 @@ class CarlinkManager(
 
                     this@CarlinkManager.callback = finalCallback
                     this@CarlinkManager.videoSurface = finalSurface
+                    // Update actual surface dimensions for touch normalization
+                    actualSurfaceWidth = pendingSurfaceWidth
+                    actualSurfaceHeight = pendingSurfaceHeight
                     // Resume with new surface - this calls setOutputSurface() internally
                     h264Renderer?.resume(finalSurface)
                 }
@@ -332,18 +339,14 @@ class CarlinkManager(
         )
 
         // Initialize H264 renderer with Surface for direct HWC rendering
-        // Surface comes from SurfaceView - no GPU composition overhead
-        // Pass platform-detected codec name and Intel VPU workaround flag
         h264Renderer =
             H264Renderer(
-                context,
                 config.width,
                 config.height,
                 surface,
                 logCallback,
                 executors,
                 platformInfo.hardwareH264DecoderName,
-                platformInfo.requiresIntelMediaCodecFixes(),
             )
 
         // Set keyframe callback - after codec reset, we need to request a new IDR frame
@@ -463,12 +466,6 @@ class CarlinkManager(
         log("Device found, opening")
         usbDevice = device
 
-        // Set recording callback if recording is active (must be before opening)
-        if (captureRecordingManager.isRecording()) {
-            device.setRecordingCallback(createRecordingCallback())
-            logInfo("Recording callback attached to USB device", tag = Logger.Tags.USB)
-        }
-
         if (!device.openWithPermission()) {
             logError("Failed to open USB device", tag = Logger.Tags.USB)
             setState(State.DISCONNECTED)
@@ -569,6 +566,7 @@ class CarlinkManager(
 
         // Stop audio
         if (audioInitialized) {
+            audioManager?.setActiveStreamType(ActiveStreamType.MEDIA)
             audioManager?.release()
             audioInitialized = false
             logInfo("Audio released on stop", tag = Logger.Tags.AUDIO)
@@ -592,221 +590,15 @@ class CarlinkManager(
     fun sendKey(command: CommandMapping): Boolean = adapterDriver?.sendCommand(command) ?: false
 
     /**
-     * Send a touch event.
-     */
-    fun sendTouch(
-        action: TouchAction,
-        x: Float,
-        y: Float,
-    ): Boolean {
-        val normalizedX = x / config.width
-        val normalizedY = y / config.height
-        return adapterDriver?.sendTouch(action, normalizedX, normalizedY) ?: false
-    }
-
-    /**
      * Send a multi-touch event.
      */
     fun sendMultiTouch(touches: List<MessageSerializer.TouchPoint>): Boolean = adapterDriver?.sendMultiTouch(touches) ?: false
-
-    // ========== Capture Playback Injection Methods ==========
-
-    /**
-     * Check if the video renderer is ready for data injection.
-     * Used by capture playback to verify the pipeline is ready.
-     */
-    fun isRendererReady(): Boolean = h264Renderer != null && videoInitialized
-
-    // Track injected video count
-    private var injectedVideoCount = 0
-
-    /**
-     * Inject raw H.264 video data directly into the renderer.
-     * Used by capture playback to replay captured video frames.
-     *
-     * @param data Raw H.264 NAL data (without protocol headers)
-     * @param flags Optional flags (e.g., keyframe indicator)
-     */
-    fun injectVideoData(data: ByteArray, flags: Int = 0) {
-        if (!videoInitialized) {
-            logDebug("[PLAYBACK_INJECT] Video not initialized, discarding frame", tag = Logger.Tags.VIDEO)
-            return
-        }
-        injectedVideoCount++
-        if (injectedVideoCount <= 5 || injectedVideoCount % 100 == 0) {
-            logDebug("[PLAYBACK_INJECT] Injecting video #$injectedVideoCount: ${data.size} bytes", tag = Logger.Tags.VIDEO)
-        }
-        h264Renderer?.processData(data, flags)
-    }
-
-    // Track injected audio count for debugging
-    private var injectedAudioCount = 0
-
-    /**
-     * Inject audio data directly into the audio manager.
-     * Used by capture playback to replay captured audio.
-     *
-     * @param data Raw PCM audio data
-     * @param audioType Audio type (1=media, 2=nav, 3=voice, etc.)
-     * @param decodeType Decode type (audio format/sample rate indicator)
-     */
-    fun injectAudioData(data: ByteArray, audioType: Int, decodeType: Int) {
-        if (!audioInitialized) {
-            logDebug("[PLAYBACK_INJECT] Audio not initialized, discarding audio", tag = Logger.Tags.AUDIO)
-            return
-        }
-        injectedAudioCount++
-        if (injectedAudioCount <= 5 || injectedAudioCount % 500 == 0) {
-            logDebug(
-                "[PLAYBACK_INJECT] Injecting audio #$injectedAudioCount: ${data.size} bytes, " +
-                    "type=$audioType, decode=$decodeType",
-                tag = Logger.Tags.AUDIO,
-            )
-        }
-        audioManager?.writeAudio(data, audioType, decodeType)
-    }
-
-    /**
-     * Prepare for capture playback mode.
-     * Stops USB adapter search but keeps renderers alive and ensures audio is initialized.
-     */
-    fun prepareForPlayback() {
-        logInfo("[PLAYBACK_INJECT] Preparing for playback mode", tag = Logger.Tags.VIDEO)
-        // Stop USB communication but keep renderers
-        adapterDriver?.stop()
-        adapterDriver = null
-        usbDevice?.close()
-        usbDevice = null
-        cancelReconnect()
-        clearPairTimeout()
-        stopFrameInterval()
-
-        // Clear SPS/PPS cache so decoder receives fresh config from playback source
-        h264Renderer?.clearSpsPpsCache()
-
-        // Ensure audio is initialized for playback
-        if (!audioInitialized && audioManager != null) {
-            audioInitialized = audioManager?.initialize() ?: false
-            if (audioInitialized) {
-                logInfo("[PLAYBACK_INJECT] Audio initialized for playback", tag = Logger.Tags.AUDIO)
-            } else {
-                logError("[PLAYBACK_INJECT] Failed to initialize audio for playback", tag = Logger.Tags.AUDIO)
-            }
-        }
-    }
-
-    /**
-     * Resume normal adapter mode after playback.
-     */
-    fun resumeAdapterMode() {
-        logInfo("[PLAYBACK_INJECT] Resuming adapter mode", tag = Logger.Tags.VIDEO)
-        // Restart will reinitialize USB connection
-        scope.launch {
-            start()
-        }
-    }
-
-    // ========== End Playback Injection Methods ==========
-
-    // ========== Capture Recording Methods ==========
-
-    /**
-     * Get capture recording manager for UI access to state/stats.
-     */
-    fun getCaptureRecordingManager(): CaptureRecordingManager = captureRecordingManager
-
-    /**
-     * Recording state flow for UI observation.
-     */
-    val recordingState: kotlinx.coroutines.flow.StateFlow<CaptureRecordingManager.State>
-        get() = captureRecordingManager.state
-
-    /**
-     * Recording stats flow for UI observation.
-     */
-    val recordingStats: kotlinx.coroutines.flow.StateFlow<CaptureRecordingManager.Stats>
-        get() = captureRecordingManager.stats
-
-    /**
-     * Configure output directory for capture recording.
-     * Call this before startRecording().
-     *
-     * @param directoryUri SAF URI for output directory
-     * @return True if directory is valid and writable
-     */
-    suspend fun setRecordingOutputDirectory(directoryUri: Uri): Boolean {
-        val result = captureRecordingManager.setOutputDirectory(directoryUri)
-        isRecordingConfigured = result
-        logInfo("Recording output directory ${if (result) "configured" else "failed"}", tag = Logger.Tags.USB)
-        return result
-    }
-
-    /**
-     * Start capture recording.
-     * Can be called BEFORE adapter connection - recording will capture all communication.
-     *
-     * @return True if recording started successfully
-     */
-    suspend fun startRecording(): Boolean {
-        if (!isRecordingConfigured) {
-            logError("Cannot start recording: output directory not configured", tag = Logger.Tags.USB)
-            return false
-        }
-
-        val started = captureRecordingManager.startRecording()
-        if (started) {
-            // Set recording callback on USB device if already connected
-            usbDevice?.setRecordingCallback(createRecordingCallback())
-            logInfo("Recording started: ${captureRecordingManager.getSessionId()}", tag = Logger.Tags.USB)
-        }
-        return started
-    }
-
-    /**
-     * Stop capture recording.
-     * Writes JSON metadata and finalizes capture files.
-     *
-     * @return True if stopped successfully
-     */
-    suspend fun stopRecording(): Boolean {
-        // Clear recording callback from USB device
-        usbDevice?.setRecordingCallback(null)
-
-        val stopped = captureRecordingManager.stopRecording()
-        if (stopped) {
-            logInfo("Recording stopped", tag = Logger.Tags.USB)
-        }
-        return stopped
-    }
-
-    /**
-     * Check if recording is currently active.
-     */
-    fun isRecording(): Boolean = captureRecordingManager.isRecording()
-
-    /**
-     * Create the recording callback that bridges UsbDeviceWrapper to CaptureRecordingManager.
-     * Data is now captured at USB boundary (before ring buffer processing) matching pi-carplay.
-     */
-    private fun createRecordingCallback(): UsbDeviceWrapper.RecordingCallback {
-        return object : UsbDeviceWrapper.RecordingCallback {
-            override fun onPacket(direction: String, type: Int, data: ByteArray) {
-                // Data is already complete (header + payload) from USB layer
-                captureRecordingManager.recordPacket(direction, type, data)
-            }
-        }
-    }
-
-    // ========== End Capture Recording Methods ==========
 
     /**
      * Release all resources.
      */
     fun release() {
         stop()
-
-        // Release capture recording
-        captureRecordingManager.release()
 
         h264Renderer?.stop()
         h264Renderer = null
@@ -908,8 +700,8 @@ class CarlinkManager(
         // Clear surface reference - it's now invalid
         videoSurface = null
 
-        // Pause codec immediately to prevent rendering to dead surface
-        h264Renderer?.pause()
+        // Stop codec immediately - surface is dead
+        h264Renderer?.stop()
     }
 
     /**
@@ -930,7 +722,7 @@ class CarlinkManager(
      */
     fun pauseVideo() {
         logInfo("[LIFECYCLE] Pausing video for background", tag = Logger.Tags.VIDEO)
-        h264Renderer?.pause()
+        h264Renderer?.stop()
     }
 
     /**
@@ -1085,9 +877,8 @@ class CarlinkManager(
                 }
 
                 // Feed video data to renderer (fallback when direct processing not used)
-                // Pass source PTS (in milliseconds) from the video header
                 message.data?.let { data ->
-                    h264Renderer?.processDataWithPts(data, message.pts)
+                    h264Renderer?.processData(data)
                 }
             }
 
@@ -1118,10 +909,11 @@ class CarlinkManager(
             is CommandMessage -> {
                 if (message.command == CommandMapping.REQUEST_HOST_UI) {
                     callback?.onHostUIPressed()
-                } else if (message.command == CommandMapping.PROJECTION_DISCONNECTED) {
-                    scope.launch {
-                        restart()
-                    }
+                } else if (message.command == CommandMapping.WIFI_DISCONNECTED) {
+                    // WiFi status notification - adapter's WiFi hotspot has no phone connected
+                    // This is informational only, NOT a session termination signal
+                    // Real disconnects come via UnpluggedMessage (0x04)
+                    logDebug("[WIFI] Adapter WiFi status: not connected", tag = Logger.Tags.ADAPTR)
                 }
             }
 
@@ -1175,12 +967,14 @@ class CarlinkManager(
 
             AudioCommand.AUDIO_SIRI_START -> {
                 logInfo("[AUDIO_CMD] Siri started - enabling microphone (mode: SIRI)", tag = Logger.Tags.MIC)
+                audioManager?.setActiveStreamType(ActiveStreamType.SIRI)
                 activeVoiceMode = VoiceMode.SIRI
                 startMicrophoneCapture(decodeType = 5, audioType = 3)
             }
 
             AudioCommand.AUDIO_PHONECALL_START -> {
                 logInfo("[AUDIO_CMD] Phone call started - enabling microphone (mode: PHONECALL)", tag = Logger.Tags.MIC)
+                audioManager?.setActiveStreamType(ActiveStreamType.PHONE_CALL)
                 activeVoiceMode = VoiceMode.PHONECALL
                 startMicrophoneCapture(decodeType = 5, audioType = 3)
             }
@@ -1190,11 +984,13 @@ class CarlinkManager(
                 // USB capture shows: PHONECALL_START arrives ~130ms BEFORE SIRI_STOP
                 if (activeVoiceMode == VoiceMode.PHONECALL) {
                     logInfo(
-                        "[AUDIO_CMD] Siri stopped but phone call active - keeping microphone",
+                        "[AUDIO_CMD] Siri stopped but phone call active - keeping PHONE_CALL stream",
                         tag = Logger.Tags.MIC,
                     )
+                    // Don't reset stream type - phone call takes priority
                 } else {
                     logInfo("[AUDIO_CMD] Siri stopped - disabling microphone", tag = Logger.Tags.MIC)
+                    audioManager?.setActiveStreamType(ActiveStreamType.MEDIA)
                     activeVoiceMode = VoiceMode.NONE
                     stopMicrophoneCapture()
                 }
@@ -1203,6 +999,7 @@ class CarlinkManager(
 
             AudioCommand.AUDIO_PHONECALL_STOP -> {
                 logInfo("[AUDIO_CMD] Phone call stopped - disabling microphone", tag = Logger.Tags.MIC)
+                audioManager?.setActiveStreamType(ActiveStreamType.MEDIA)
                 activeVoiceMode = VoiceMode.NONE
                 stopMicrophoneCapture()
                 audioManager?.stopCallTrack()
@@ -1210,12 +1007,28 @@ class CarlinkManager(
 
             AudioCommand.AUDIO_MEDIA_START -> {
                 logDebug("[AUDIO_CMD] Media audio START command received", tag = Logger.Tags.AUDIO)
-                // Media audio data will start arriving - track is created on first packet
+                // Only set to MEDIA if no priority stream active
+                if (activeVoiceMode == VoiceMode.NONE) {
+                    audioManager?.setActiveStreamType(ActiveStreamType.MEDIA)
+                }
             }
 
             AudioCommand.AUDIO_MEDIA_STOP -> {
                 logDebug("[AUDIO_CMD] Media audio STOP command received", tag = Logger.Tags.AUDIO)
                 // Media track typically stays active, but log for debugging
+            }
+
+            AudioCommand.AUDIO_ALERT_START -> {
+                logDebug("[AUDIO_CMD] Alert started", tag = Logger.Tags.AUDIO)
+                audioManager?.setActiveStreamType(ActiveStreamType.ALERT)
+            }
+
+            AudioCommand.AUDIO_ALERT_STOP -> {
+                logDebug("[AUDIO_CMD] Alert stopped", tag = Logger.Tags.AUDIO)
+                // Only reset if not in voice mode
+                if (activeVoiceMode == VoiceMode.NONE) {
+                    audioManager?.setActiveStreamType(ActiveStreamType.MEDIA)
+                }
             }
 
             AudioCommand.AUDIO_OUTPUT_START -> {
@@ -1669,13 +1482,11 @@ class CarlinkManager(
                         return
                     }
 
-                // Use processDataDirectWithPts for accurate frame timing
                 // payloadLength includes the 20-byte video header
                 // skipBytes=20 tells the ring buffer to skip the header when reading
-                // sourcePtsMs is the presentation timestamp from video header (offset 12)
                 logVideoUsb { "processVideoDirect: payloadLength=$payloadLength, pts=$sourcePtsMs" }
 
-                renderer.processDataDirectWithPts(payloadLength, 20, sourcePtsMs) { buffer, offset ->
+                renderer.processData(payloadLength, 20) { buffer, offset ->
                     // Read USB data directly into the ring buffer
                     readCallback(buffer, offset, payloadLength)
                 }

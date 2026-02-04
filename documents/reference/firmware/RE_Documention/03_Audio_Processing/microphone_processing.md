@@ -251,6 +251,8 @@ AudioService::OnMediaStatusChange(MEDIA_STATE);
 | 16000 Hz | Supported (wideband voice) |
 | Other | **REJECTED** - WebRTC initialization fails |
 
+**FAILURE MODE:** Using any sample rate other than 8kHz or 16kHz for microphone input will cause WebRTC AECM initialization to fail. This is a **HARD REQUIREMENT** - the firmware will reject the audio and may cause session termination or silent mic failure. Host applications MUST capture microphone audio at 8kHz or 16kHz only.
+
 ---
 
 ## Summary

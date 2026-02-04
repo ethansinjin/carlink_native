@@ -2,7 +2,8 @@
 
 **Status:** VERIFIED against 25+ capture sessions + firmware binary analysis
 **Consolidated from:** All research projects (GM_research, carlink_native, pi-carplay)
-**Last Updated:** 2026-01-22
+**Firmware Version:** 2025.10.15.1127 (binary analysis reference version)
+**Last Updated:** 2026-02-03 (Complete binary verification of all message types via radare2 disassembly)
 
 ---
 
@@ -62,7 +63,12 @@ All USB messages use a common 16-byte header:
 - VideoData (0x06): 36 bytes total (16 USB + 20 video-specific)
 - NaviVideoData (0x2C): 36 bytes total (16 USB + 20 video-specific) - **same structure as main video**
 
-See `video_protocol.md` for detailed header structures.
+**⚠️ Video Processing Note:** VideoData contains **live UI projection**, not traditional video. The adapter forwards frames without buffering or policy decisions. Host apps must:
+- Drop late frames (>30-40ms) to prevent decoder poisoning - a balance is needed; too long causes visible corruption, too short drops valid frames
+- Keep buffers shallow (~150ms jitter absorption)
+- Reset decoder on corruption (don't wait for self-healing)
+
+See `video_protocol.md` for detailed header structures and host implementation guidance.
 
 **AudioData (0x07) Commands:** When payload is 13 bytes, contains audio command (not PCM data):
 ```
@@ -82,11 +88,16 @@ Payload (13 bytes):
 See `command_ids.md` for complete flow documentation and `../03_Audio_Processing/audio_formats.md` for audio format details.
 
 **Audio Formats (decodeType):**
-| decodeType | Sample Rate | Channels | Use Case |
-|------------|-------------|----------|----------|
-| 3 | 8000 Hz | Mono | Phone call (narrow-band) |
-| 4 | 48000 Hz | Stereo | Media HD / CarPlay |
-| 5 | 16000 Hz | Mono | Siri / Mic input |
+| decodeType | Sample Rate | Channels | Use Case | Status |
+|------------|-------------|----------|----------|--------|
+| 2 | 44100 Hz | Stereo | **Dual-purpose:** Commands (13-byte payload) OR 44.1kHz media audio | VERIFIED |
+| 3 | 8000 Hz | Mono | Phone call (narrow-band) | LEGACY - never observed in captures; firmware code exists but modern CarPlay negotiates 16kHz |
+| 4 | 48000 Hz | Stereo | Media HD / CarPlay | VERIFIED |
+| 5 | 16000 Hz | Mono | Siri / Mic input | VERIFIED |
+
+**Note on decode_type=2:** Behavior depends on payload size. 13-byte payloads are audio commands; larger payloads are 44.1kHz PCM audio data.
+
+**Note on decode_type=3:** Firmware still lists 8kHz as an option, but no manual configuration resulted in observed 8kHz audio during testing. May be legacy code with functionality effectively removed. Modern iPhones default to wideband (16kHz).
 
 ### Control Commands
 
@@ -94,10 +105,43 @@ See `command_ids.md` for complete flow documentation and `../03_Audio_Processing
 |------|-----|------|-----|---------|-------------|
 | 8 | 0x08 | Command | BOTH | 4 | Control commands (see below) |
 | 9 | 0x09 | LogoType | OUT | 4 | Set UI branding |
-| 12 | 0x0C | Frame | OUT | 0 | Request keyframe (IDR) |
-| 22 | 0x16 | AudioTransfer | OUT | 4 | Audio routing control |
+| 11 | 0x0B | CarPlayModeChange | IN | Variable | CarPlay mode state change |
+| 12 | 0x0C | Frame/BluetoothPIN | **DUAL** | Variable | **See Dual-Purpose Types below** |
+| 16 | 0x10 | AirPlayModeChange | IN | Variable | AirPlay mode state change |
+| 22 | 0x16 | CameraFrame | IN | Variable | Camera/reverse video input (Binary: CMD_CAMERA_FRAME) |
+
+**⚠️ CORRECTION (Feb 2026):** Type 0x16 was previously documented as "AudioTransfer". Binary analysis confirms it is `CMD_CAMERA_FRAME` (camera input). Audio transfer is Command ID 22 sent via type 0x08, not a separate message type.
+
+### Dual-Purpose Message Types (Binary Verified Feb 2026)
+
+Some message types have different meanings depending on direction. This was verified through firmware binary disassembly of `ARMadb-driver.unpacked`.
+
+| Type | Hex | OUT (Host→Adapter) | IN (Adapter→Host) |
+|------|-----|--------------------|--------------------|
+| 12 | 0x0C | **Frame** - Request IDR keyframe (0-byte payload) | **BluetoothPIN** - Pairing PIN (variable payload) |
+
+**Type 0x0C Details:**
+
+**When sending (OUT):** Host sends Type 0x0C with no payload to request a video keyframe (IDR). This is used when the video decoder needs to resync.
+```
+Header: aa 55 aa 55 00 00 00 00 0c 00 00 00 f3 ff ff ff
+        └─ magic    └─ len=0   └─ type=12 └─ check
+```
+
+**When receiving (IN):** Adapter sends Type 0x0C with the Bluetooth pairing PIN as payload. The host displays this PIN for user verification during pairing.
+```
+Header + Payload: aa 55 aa 55 04 00 00 00 0c 00 00 00 f3 ff ff ff [PIN bytes]
+                  └─ magic    └─ len=4   └─ type=12              └─ e.g., "1234"
+```
+
+**App Implementation Note:** The Kotlin app correctly implements both:
+- `MessageType.BLUETOOTH_PIN(0x0C)` for receiving pairing PIN
+- `CommandMapping.FRAME(12)` sends as Command payload (type 0x08 with cmd_id=12)
+
+**⚠️ IMPORTANT:** The app uses Command ID 12 via message type 0x08 for keyframe requests, NOT raw message type 0x0C. Both approaches work - the firmware handles Command 12 identically to Message Type 0x0C with no payload.
 
 **Command (0x08) IDs:** Payload is a 4-byte command ID. Full reference: `command_ids.md`
+**Detailed Usage:** See `command_details.md` for binary-verified purpose, when to use, and expected behavior for each command.
 - Basic (1-31): Mic, Siri, Night Mode, GNSS, WiFi band, Standby, BLE
 - Controls (100-114): D-Pad buttons, Rotary knob
 - Media (200-205): Play, Pause, Next, Prev
@@ -109,7 +153,7 @@ See `command_ids.md` for complete flow documentation and `../03_Audio_Processing
 | Type | Hex | Name | Dir | Payload | Description |
 |------|-----|------|-----|---------|-------------|
 | 10 | 0x0A | BluetoothAddress | IN | 17 | Box BT address |
-| 12 | 0x0C | BluetoothPIN | IN | Variable | Pairing PIN |
+| 12 | 0x0C | BluetoothPIN | IN | Variable | Pairing PIN (**dual-purpose type, see above**) |
 | 13 | 0x0D | BluetoothDeviceName | IN | 8 | BT device name |
 | 14 | 0x0E | WifiDeviceName | IN | 8 | WiFi device name |
 | 18 | 0x12 | BluetoothPairedList | IN | 50 | Paired device list |
@@ -128,17 +172,77 @@ See `command_ids.md` for complete flow documentation and `../03_Audio_Processing
 
 | Type | Hex | Name | Dir | Payload | Description |
 |------|-----|------|-----|---------|-------------|
-| 24 | 0x18 | HiCarLink | IN | 113 | HiCar connection URL |
-| 35 | 0x23 | PeerBluetoothAddress | IN | 17 | Peer BT address |
-| 36 | 0x24 | PeerBluetoothAddressAlt | IN | 17 | Alt BT address |
-| 37 | 0x25 | UiHidePeerInfo | IN | 0 | Hide peer info |
-| 38 | 0x26 | UiBringToForeground | IN | 0 | Bring UI forward |
+| 24 | 0x18 | HiCarLink | IN | 113 | HiCar connection URL (Binary: CMD_CONNECTION_URL) |
+| 35 | 0x23 | BluetoothConnectStart | IN | 17 | BT connection started, contains peer address (Binary: Bluetooth_ConnectStart) |
+| 36 | 0x24 | BluetoothConnected | IN | 17 | BT connected, contains peer address (Binary: Bluetooth_Connected) |
+| 37 | 0x25 | BluetoothDisconnect | IN | 0 | BT disconnected notification (Binary: Bluetooth_DisConnect) |
+| 38 | 0x26 | BluetoothListen | IN | 0 | BT listening/advertising (Binary: Bluetooth_Listen) |
+
+**Note:** Types 0x23-0x26 are Bluetooth state notifications. The firmware uses `Bluetooth_*` naming internally.
+Previously documented as peer info types - corrected based on binary analysis Feb 2026.
+
+### Navigation & Vehicle Data (Binary Verified Feb 2026)
+
+| Type | Hex | Name | Dir | Payload | Description |
+|------|-----|------|-----|---------|-------------|
+| 40 | 0x28 | iAP2PlistBinary | IN | Variable | iAP2 plist binary data |
+| 41 | 0x29 | GnssData | OUT | Variable | GPS/GNSS location data forwarded to phone (Binary: GNSS_DATA) |
+| 43 | 0x2B | ConnectionPinCode | IN | Variable | BT pairing PIN code (Binary: Connection_PINCODE) |
+| 44 | 0x2C | NaviVideoData | IN | Variable | Navigation video stream (Binary: AltVideoFrame) |
+
+**⚠️ IMPORTANT:** Type 0x2B is `Connection_PINCODE`, NOT AltVideoFrame. Navigation video is type 0x2C.
+This was verified from binary string table at switch statement fcn.00017b74.
+
+### Bluetooth PIN Message Types - Binary Analysis (Feb 2026)
+
+The firmware has **two distinct** Bluetooth PIN message types with different purposes:
+
+| Type | Hex | Binary Name | Purpose | Direction |
+|------|-----|-------------|---------|-----------|
+| 12 | 0x0C | CMD_SET_BLUETOOTH_PIN_CODE | Configuration PIN | BOTH |
+| 43 | 0x2B | Connection_PINCODE | Pairing PIN | IN |
+
+**Type 0x0C - Configuration PIN (CMD_SET_BLUETOOTH_PIN_CODE):**
+- **Purpose:** Set/configure the Bluetooth PIN code stored in adapter
+- **Config Key:** `HU_BT_PIN_CODE` (persistent storage)
+- **When Used:** During initial adapter configuration or when changing PIN
+- **Related String:** `"Set Bluetooth Pin Code: %s"` (at 0x6e86d)
+- **Dual-purpose:** Also used as keyframe request (OUT with 0-byte payload)
+
+**Type 0x2B - Pairing PIN (Connection_PINCODE):**
+- **Purpose:** Real-time PIN notification during active Bluetooth pairing
+- **When Used:** During phone-to-adapter Bluetooth pairing flow
+- **Direction:** Adapter→Host only (IN)
+- **Related String:** `"Send connetion pincode to HU: %s"` (at 0x6d363)
+- **Code Reference:** Function at 0x1911c uses `movs r1, 0x2b` when sending
+
+**Why Two Types?**
+The firmware separates PIN handling into configuration vs. pairing:
+1. **0x0C (Configuration):** Persistent setting - the PIN stored in adapter config that will be used for ALL pairings
+2. **0x2B (Pairing):** Transient notification - the actual PIN to display during a specific pairing session
+
+**Typical Flow:**
+1. Host sends 0x0C (OUT) to configure adapter's Bluetooth PIN
+2. Phone initiates pairing with adapter
+3. Adapter sends 0x2B (IN) with PIN for host to display
+4. User confirms PIN on phone and host
+
+**Binary Evidence:**
+```
+fcn.00017b74 dispatch table:
+  0x17cb0: Type 0x0C → loads "CMD_SET_BLUETOOTH_PIN_CODE"
+  0x17d10: Type 0x2B → loads "Connection_PINCODE"
+
+fcn.0001911c (PIN sender):
+  0x1913a: movs r1, 0x2b  ; Sets message type to 0x2B
+  0x1914a: ldr r2, "Send connetion pincode to HU: %s"
+```
 
 ### Media Metadata
 
 | Type | Hex | Name | Dir | Payload | Description |
 |------|-----|------|-----|---------|-------------|
-| 42 | 0x2A | MediaData | IN | Variable | Rich media metadata (JSON) |
+| 42 | 0x2A | MediaData | IN | Variable | Rich media metadata (Binary: DashBoard_DATA) |
 
 **MediaData Subtypes (first 4 bytes of payload):**
 
@@ -146,12 +250,13 @@ See `command_ids.md` for complete flow documentation and `../03_Audio_Processing
 |---------|-----|---------|--------------|
 | 1 | 0x00000001 | JSON metadata (song info, playback time) | 30-202 bytes |
 | 3 | 0x00000003 | Binary data (album artwork - JPEG) | 170-180 KB |
+| 200 | 0x000000C8 | Navigation JSON (route, TBT directions) | 30-200 bytes |
 
 **Packet Structure:**
 ```
 Offset  Size  Field        Description
 ------  ----  -----        -----------
-0x00    4     Subtype      Content type indicator (1=JSON, 3=JPEG)
+0x00    4     Subtype      Content type indicator (1=JSON, 3=JPEG, 200=NaviJSON)
 0x04    N     Content      JSON string or JPEG image data
 ```
 
@@ -174,9 +279,42 @@ Offset  Size  Field        Description
 - Typical resolution: 300x300 to 600x600 pixels
 - Transferred via iAP2 file transfer session (`mediaItemArtworkFileTransferIdentifier`)
 
+**Navigation JSON (Subtype 200 / 0xC8) - Capture Verified Feb 2026:**
+
+Sent when `DashboardInfo` bit 2 is set and iPhone has active navigation. Contains turn-by-turn route guidance data from Apple Maps.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `NaviStatus` | int | 0=inactive, 1=active, 2=calculating |
+| `NaviTimeToDestination` | int | ETA in seconds |
+| `NaviDestinationName` | string | Destination name |
+| `NaviDistanceToDestination` | int | Total remaining distance (meters) |
+| `NaviAPPName` | string | Navigation app (e.g., "Apple Maps") |
+| `NaviRemainDistance` | int | Distance to next maneuver (meters) |
+| `NaviRoadName` | string | Current or next road name |
+| `NaviOrderType` | int | Turn order in route sequence |
+| `NaviManeuverType` | int | Maneuver type code |
+
+**Example NaviJSON Payloads:**
+```json
+{"NaviStatus":1,"NaviTimeToDestination":480,"NaviDestinationName":"Speedway","NaviDistanceToDestination":6124,"NaviAPPName":"Apple Maps"}
+```
+```json
+{"NaviRoadName":"Farrior Dr","NaviRoadName":"Start on Farrior Dr","NaviOrderType":1,"NaviManeuverType":11}
+```
+```json
+{"NaviRemainDistance":26}
+```
+
+**iAP2 Source Messages:**
+- `0x5200` StartRouteGuidanceUpdate - Adapter requests TBT data
+- `0x5201` RouteGuidanceUpdate - Route status from iPhone
+- `0x5202` RouteGuidanceManeuverUpdate - Turn instructions from iPhone
+
 **Firmware Evidence (ARMiPhoneIAP2):**
 - JSON fields: `MediaSongName`, `MediaAlbumName`, `MediaArtistName`, `MediaAPPName`, `MediaSongDuration`, `MediaSongPlayTime`
 - Artwork: `mediaItemArtworkFileTransferIdentifier`, `CiAP2MediaPlayerEngine_Send_NowPlayingMeidaArtwork`
+- Navigation: `iAP2RouteGuidanceEngine`, `_SendNaviJSON`, `NaviStatus`, `NaviDestinationName`
 
 ### Session Establishment (Encrypted Blob)
 
@@ -285,25 +423,34 @@ Offset  Size  Field           Description
 |------|-----|------|-----|---------|-------------|
 | 506 | 0x1FA | NaviFocus | OUT | 0 | Request nav focus |
 | 507 | 0x1FB | NaviRelease | OUT | 0 | Release nav focus |
-| 508 | 0x1FC | RequestNaviScreenFocus | BOTH | 0 | **Bidirectional handshake** |
+| 508 | 0x1FC | RequestNaviScreenFocus | BOTH | 0 | **Asymmetric handshake**: Adapter sends first (IN), host echoes back (OUT) |
 | 509 | 0x1FD | ReleaseNaviScreenFocus | OUT | 0 | Release nav screen |
 | 110 | 0x6E | NaviFocusRequest | IN | 0 | Nav requesting focus |
 | 111 | 0x6F | NaviFocusRelease | IN | 0 | Nav released focus |
 
-### WiFi Connection State
+### WiFi/Bluetooth Connection Status (Binary Verified Feb 2026)
+
+**⚠️ CORRECTED:** Previous documentation incorrectly labeled these commands. Verified via `ARMadb-driver` binary disassembly.
 
 | Type | Hex | Name | Dir | Payload | Description |
 |------|-----|------|-----|---------|-------------|
+| 1003 | 0x3EB | ScaningDevices | IN | 0 | Adapter scanning for devices |
 | 1004 | 0x3EC | DeviceFound | IN | 0 | Device found during scan |
-| 1007 | 0x3EF | DeviceConnected | IN | 0 | WiFi connected |
-| 1008 | 0x3F0 | StreamReady | IN | 0 | Streaming ready |
-| 1010 | 0x3F2 | ConnectionComplete | IN | 0 | Connection established |
+| 1005 | 0x3ED | DeviceNotFound | IN | 0 | No device found in scan |
+| 1007 | 0x3EF | DeviceBluetoothConnected | IN | 0 | Bluetooth connected |
+| 1008 | 0x3F0 | DeviceBluetoothNotConnected | IN | 0 | Bluetooth disconnected |
+| 1009 | 0x3F1 | DeviceWifiConnected | IN | 0 | Phone connected to adapter WiFi hotspot |
+| 1010 | 0x3F2 | DeviceWifiNotConnected | IN | 0 | No phone connected to adapter WiFi hotspot |
 
-### IDR Notification
+**Critical Note on 1010 (DeviceWifiNotConnected):**
 
-| Type | Hex | Name | Dir | Payload | Description |
-|------|-----|------|-----|---------|-------------|
-| 1009 | 0x3F1 | IdrSent | IN | 0 | IDR frame sent notification |
+This is a **WiFi hotspot status notification**, NOT a session termination signal. The adapter sends this when:
+- During initialization (no phone connected yet)
+- Periodically while idle/waiting for connection
+- When WiFi link drops during wireless session
+
+**Host apps must NOT terminate sessions upon receiving 1010.** For USB CarPlay, WiFi status is irrelevant.
+Use `Unplugged` (0x04) or `Phase 0` for session termination detection.
 
 ---
 
@@ -387,13 +534,16 @@ Offset  Size  Field        Description
 | 503 | 0x1F7 | unknown503 | Android Auto related |
 | 504 | 0x1F8 | RequestAudioFocusDuck | Request audio focus with ducking (AA) |
 | 505 | 0x1F9 | ReleaseAudioFocus | Release audio focus (AA) |
-| 1000 | 0x3E8 | wifiEnable | WiFi enabled notification |
-| 1001 | 0x3E9 | autoConnectEnable | Auto-connect enabled |
-| 1002 | 0x3EA | wifiConnect | WiFi connect command |
-| 1003 | 0x3EB | scanningDevice | Device scanning |
-| 1005 | 0x3ED | unknown1005 | Android Auto related |
-| 1007 | 0x3EF | btConnected | Bluetooth connected |
-| 1010 | 0x3F2 | projectionDisconnected | Session ended |
+| 1000 | 0x3E8 | SupportWifi | WiFi mode supported |
+| 1001 | 0x3E9 | SupportAutoConnect | Auto-connect supported |
+| 1002 | 0x3EA | StartAutoConnect | Start auto-connect scan |
+| 1003 | 0x3EB | ScaningDevices | Device scanning |
+| 1004 | 0x3EC | DeviceFound | Device found |
+| 1005 | 0x3ED | DeviceNotFound | No device found |
+| 1007 | 0x3EF | DeviceBluetoothConnected | Bluetooth connected |
+| 1008 | 0x3F0 | DeviceBluetoothNotConnected | Bluetooth disconnected |
+| 1009 | 0x3F1 | DeviceWifiConnected | WiFi hotspot: phone connected |
+| 1010 | 0x3F2 | DeviceWifiNotConnected | WiFi hotspot: no phone connected (**NOT session end**) |
 
 ### BoxSettings (0x19) - JSON Configuration
 
@@ -437,7 +587,7 @@ Offset  Size  Field        Description
 | `speechVol` | float | Speech/Siri volume | - |
 | `otherVol` | float | Other audio volume | - |
 | `echoDelay` | int | Echo cancellation (ms) | `EchoLatency` |
-| `callQuality` | int | Voice call quality | `CallQuality` |
+| `callQuality` | int | Voice call quality | `CallQuality` | ⚠️ **REMOVED/BROKEN** - Removed from web UI in 2025.10.X firmware; no observed differences in manual testing. See configuration.md for details. |
 
 **Network / Connectivity:**
 
@@ -466,7 +616,7 @@ Offset  Size  Field        Description
 | `naviScreenInfo` | object | Nested object for nav video config |
 | `naviScreenInfo.width` | int | Nav screen width (default: 480) |
 | `naviScreenInfo.height` | int | Nav screen height (default: 272) |
-| `naviScreenInfo.fps` | int | Nav screen FPS (default: 30) |
+| `naviScreenInfo.fps` | int | Nav screen FPS (default: 30, range: 10-60, recommended: 24-60) |
 
 **Android Auto Mode:**
 
@@ -743,7 +893,7 @@ Offset  Size  Field        Description
 **Critical Timing:**
 - Must start **BEFORE** initialization messages on cold start
 - Send every ~2 seconds continuously
-- Missing heartbeats with `SendHeartBeat=1` triggers 11.7s disconnect
+- **Timeout values:** Binary constant shows 15,000ms (0x3a98 at address 0x21112), but practical testing shows disconnect at ~10-11.7 seconds. **Design for ~10 seconds to be safe.** The discrepancy may be due to timer starting before USB handshake completes.
 
 See `initialization.md` and `configuration.md` for detailed timing requirements.
 
@@ -751,11 +901,17 @@ See `initialization.md` and `configuration.md` for detailed timing requirements.
 
 ## Phase Values (0x03)
 
-| Value | Meaning | Capture Evidence |
-|-------|---------|------------------|
-| 0 | Idle/Standby | Documented |
-| 7 | Connecting | `@ 4.498s: Phase payload 07 00 00 00` |
-| 8 | Streaming Ready | `@ 7.504s: Phase payload 08 00 00 00` |
+| Value | Meaning | Status | Evidence |
+|-------|---------|--------|----------|
+| 0 | Session Terminated / Idle | VERIFIED | Used for session end detection |
+| 1-6 | Reserved / Internal | UNKNOWN | Not observed in captures |
+| 7 | Connecting / Negotiating | VERIFIED | `@ 4.498s: Phase payload 07 00 00 00` |
+| 8 | Streaming Ready / Active | VERIFIED | `@ 7.504s: Phase payload 08 00 00 00` |
+
+**Session Termination Detection:**
+- Phase 0 indicates session has ended
+- Use `Unplugged` (0x04) OR `Phase 0` for definitive session termination
+- Do NOT rely on Command 1010 (DeviceWifiNotConnected) for session end
 
 ---
 
@@ -939,6 +1095,73 @@ From disassembly of `ARMadb-driver_unpacked`:
 | `DeviceWifiNotConnected` | `0x5bcd1` | WiFi disconnected |
 | `CMD_BOX_INFO` | `0x5b44c` | Box info request/response |
 | `CMD_CAR_MANUFACTURER_INFO` | `0x5b3e4` | OEM info (Type 0x14) |
+
+---
+
+## Appendix: Binary-Verified Message Types (Feb 2026)
+
+Complete message type table extracted via radare2 disassembly of `ARMadb-driver_2025.10_unpacked`.
+Source: Switch statement at `fcn.00017b74` (0x17b74 - 0x17d48).
+
+| Hex  | Dec | Binary String Name               | Compare Addr | Handler Addr |
+|------|-----|----------------------------------|--------------|--------------|
+| 0x01 |   1 | Open                             | 0x17bb2      | 0x17c84      |
+| 0x02 |   2 | PlugIn                           | 0x17bb6      | 0x17c88      |
+| 0x03 |   3 | Phase                            | 0x17bba      | 0x17c8c      |
+| 0x04 |   4 | PlugOut                          | 0x17bbe      | 0x17c90      |
+| 0x05 |   5 | Command                          | 0x17bc2      | 0x17c94      |
+| 0x06 |   6 | VideoFrame                       | 0x17bc6      | 0x17c98      |
+| 0x07 |   7 | AudioFrame                       | 0x17bca      | 0x17c9c      |
+| 0x08 |   8 | CarPlayControl                   | 0x17bce      | 0x17ca0      |
+| 0x09 |   9 | LogoType                         | 0x17bd2      | 0x17ca4      |
+| 0x0A |  10 | SetBluetoothAddress              | 0x17bd6      | 0x17ca8      |
+| 0x0B |  11 | CMD_CARPLAY_MODE_CHANGE          | 0x17bda      | 0x17cac      |
+| 0x0C |  12 | CMD_SET_BLUETOOTH_PIN_CODE       | 0x17bde      | 0x17cb0      |
+| 0x0D |  13 | HUDComand_D_BluetoothName        | 0x17be2      | 0x17cb4      |
+| 0x0E |  14 | CMD_BOX_WIFI_NAME                | 0x17be6      | 0x17cb8      |
+| 0x0F |  15 | CMD_MANUAL_DISCONNECT_PHONE      | 0x17bea      | 0x17cbc      |
+| 0x10 |  16 | CMD_CARPLAY_AirPlayModeChanges   | 0x17bee      | 0x17cc0      |
+| 0x11 |  17 | AutoConnect_By_BluetoothAddress  | 0x17bf2      | 0x17cc4      |
+| 0x12 |  18 | kRiddleHUDComand_D_Bluetooth_BondList | 0x17bf6 | 0x17cc8      |
+| 0x13 |  19 | CMD_BLUETOOTH_ONLINE_LIST        | 0x17bfa      | 0x17ccc      |
+| 0x14 |  20 | CMD_CAR_MANUFACTURER_INFO        | 0x17bfe      | 0x17cd0      |
+| 0x15 |  21 | CMD_STOP_PHONE_CONNECTION        | 0x17c02      | 0x17cd4      |
+| 0x16 |  22 | CMD_CAMERA_FRAME                 | 0x17c06      | 0x17cd8      |
+| 0x17 |  23 | CMD_MULTI_TOUCH                  | 0x17c0a      | 0x17cdc      |
+| 0x18 |  24 | CMD_CONNECTION_URL               | 0x17c0e      | 0x17ce0      |
+| 0x19 |  25 | CMD_BOX_INFO                     | 0x17c12      | 0x17ce4      |
+| 0x1A |  26 | CMD_PAY_RESULT                   | 0x17c16      | 0x17ce8      |
+| 0x1B |  27 | BTAudioDevice_Signal             | 0x17ba0      | 0x17d46      |
+| 0x1E |  30 | Bluetooth_Search                 | 0x17c1a      | 0x17cec      |
+| 0x1F |  31 | Bluetooth_Found                  | 0x17c1e      | 0x17cf0      |
+| 0x20 |  32 | Bluetooth_SearchStart            | 0x17c22      | 0x17cf4      |
+| 0x21 |  33 | Bluetooth_SearchEnd              | 0x17c26      | 0x17cf8      |
+| 0x22 |  34 | ForgetBluetoothAddr              | 0x17c2a      | 0x17cfc      |
+| 0x23 |  35 | Bluetooth_ConnectStart           | 0x17ba6      | 0x17c78      |
+| 0x24 |  36 | Bluetooth_Connected              | 0x17c2e      | 0x17d00      |
+| 0x25 |  37 | Bluetooth_DisConnect             | 0x17baa      | 0x17c7c      |
+| 0x26 |  38 | Bluetooth_Listen                 | 0x17bae      | 0x17c80      |
+| 0x28 |  40 | iAP2Type_PlistBinary             | 0x17c32      | 0x17d04      |
+| 0x29 |  41 | GNSS_DATA                        | 0x17c36      | 0x17d08      |
+| 0x2A |  42 | DashBoard_DATA                   | 0x17c3a      | 0x17d0c      |
+| 0x2B |  43 | Connection_PINCODE               | 0x17c3e      | 0x17d10      |
+| 0x2C |  44 | AltVideoFrame                    | 0x17c42      | 0x17d14      |
+| 0x77 | 119 | FactorySetting                   | 0x17c46      | 0x17d18      |
+| 0x88 | 136 | CMD_DEBUG_TEST                   | 0x17c4a      | 0x17d1c      |
+| 0x99 | 153 | HUDComand_A_UploadFile           | 0x17c4e      | 0x17d20      |
+| 0xAA | 170 | HUDComand_A_HeartBeat            | 0x17c52      | 0x17d24      |
+| 0xBB | 187 | CMD_UPDATE                       | 0x17c56      | 0x17d28      |
+| 0xCC | 204 | HUDComand_B_BoxSoftwareVersion   | 0x17c5a      | 0x17d2c      |
+| 0xCD | 205 | HUDComand_A_Reboot               | 0x17c5e      | 0x17d30      |
+| 0xCE | 206 | HUDComand_A_ResetUSB             | 0x17c62      | 0x17d34      |
+| 0xFD | 253 | HUDComand_D_Ready                | 0x17c66      | 0x17d38      |
+| 0xFF | 255 | CMD_ACK                          | 0x17c6e      | (inline)     |
+
+**Gaps in sequence (not defined in binary):** 0x1C (28), 0x1D (29), 0x27 (39)
+
+**Special handling:**
+- 0xFF (CMD_ACK) - handled inline at 0x17c6e-0x17c74
+- Unknown types - logged as "Unkown_RiddleHUDComand_" at 0x17c6a
 
 ---
 

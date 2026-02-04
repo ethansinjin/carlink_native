@@ -436,6 +436,13 @@ class UsbDeviceWrapper(
             log("Reading loop started" + if (activeRecordingCallback != null) " (recording enabled)" else "")
             val headerBuffer = ByteArray(16)
 
+            // Pre-allocate video buffer to avoid per-frame allocation (reduces GC pressure at 60fps)
+            // Initial size 256KB covers most frames; grows if needed (rare for 1080p H.264)
+            var videoBuffer = ByteArray(256 * 1024)
+
+            // Pre-allocate chunk buffer for non-video message reads (audio, commands, etc.)
+            val chunkBuffer = ByteArray(16384)
+
             // Pre-allocate raw capture buffer for video packets (reused to avoid allocation per frame)
             // This buffer captures raw USB data BEFORE any processing - matching pi-carplay approach
             var rawCaptureBuffer: ByteArray? = if (activeRecordingCallback != null) ByteArray(512 * 1024) else null
@@ -531,7 +538,10 @@ class UsbDeviceWrapper(
                                 } else {
                                     // NO RECORDING: Read all video data, extract PTS, then process
                                     // This approach is more reliable than partial reads
-                                    val videoBuffer = ByteArray(header.length)
+                                    // Reuse pre-allocated buffer; grow only if needed (rare)
+                                    if (videoBuffer.size < header.length) {
+                                        videoBuffer = ByteArray(maxOf(header.length, videoBuffer.size * 2))
+                                    }
                                     var totalRead = 0
                                     var readAttempts = 0
                                     var lastChunkResult = 0
@@ -597,17 +607,17 @@ class UsbDeviceWrapper(
                         continue
                     }
 
-                    // Read payload for non-video messages
+                    // Read payload for non-video messages (audio, commands, media metadata, etc.)
                     val payload =
                         if (header.length > 0) {
                             val payloadBuffer = ByteArray(header.length)
                             var totalRead = 0
                             while (totalRead < header.length && _isReadingLoopActive.get()) {
                                 val remaining = header.length - totalRead
-                                val chunk = ByteArray(minOf(remaining, 16384))
-                                val chunkRead = read(chunk, timeout)
+                                val toRead = minOf(remaining, chunkBuffer.size)
+                                val chunkRead = read(chunkBuffer, timeout)
                                 if (chunkRead > 0) {
-                                    System.arraycopy(chunk, 0, payloadBuffer, totalRead, chunkRead)
+                                    System.arraycopy(chunkBuffer, 0, payloadBuffer, totalRead, chunkRead)
                                     totalRead += chunkRead
                                 } else if (chunkRead == -1) {
                                     // Timeout

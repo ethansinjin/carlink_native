@@ -167,15 +167,6 @@ class AdapterDriver(
     }
 
     /**
-     * Send a touch event.
-     */
-    fun sendTouch(
-        action: TouchAction,
-        x: Float,
-        y: Float,
-    ): Boolean = send(MessageSerializer.serializeTouch(action, x, y))
-
-    /**
      * Send a multi-touch event.
      */
     fun sendMultiTouch(touches: List<MessageSerializer.TouchPoint>): Boolean = send(MessageSerializer.serializeMultiTouch(touches))

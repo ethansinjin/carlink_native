@@ -2,7 +2,87 @@
 
 **Purpose:** Guide for implementing a CarPlay/Android Auto host application
 **Consolidated from:** GM_research implementation docs, carlink_native
-**Last Updated:** 2026-01-19
+**Last Updated:** 2026-01-30
+
+---
+
+## Critical: Host App Responsibility
+
+**The adapter is a protocol tunnel. The host app owns all correctness.**
+
+```
+Phone ──▶ Adapter (tunnel) ──▶ Host App (policy) ──▶ Decoder ──▶ Display
+              │                      │
+              │                      └── YOU decide: drop, buffer, reset
+              └── Just forwards data, makes no decisions
+```
+
+The adapter does NOT:
+- Buffer or pace video
+- Drop late frames
+- Reset decoder on errors
+- Compensate for jitter
+- Enforce timing
+
+**If video corrupts or latency grows, the problem is in your host app's policy.**
+
+---
+
+## Video: Projection Model (NOT Playback)
+
+**CarPlay/Android Auto video is live UI projection, not video playback.**
+
+Think of it like VNC or screen sharing: you're seeing the phone's screen in real-time. The user is touching, swiping, and interacting. They need immediate visual feedback.
+
+### The Common Mistake
+
+Treating projection video like a media file:
+```
+WRONG: Receive → Buffer → Decode in order → Render smoothly
+RIGHT: Receive → Is it late? → Yes: DROP / No: Decode NOW → Render ASAP
+```
+
+### Projection Video Rules
+
+| Rule | Rationale |
+|------|-----------|
+| Drop late frames (>30-40ms) | Late frames poison decoder reference state. Balance needed: too long causes corruption, too short drops valid frames |
+| Keep buffers shallow (~150ms) | Deep buffers create input latency |
+| Reset decoder on corruption | Decoders don't self-heal from reference errors |
+| Accept frame drops as normal | Drops are harmless; latency is harmful |
+| Don't enforce FPS targets | Stream is variable rate by design |
+| Don't "catch up" via backlog | Playing old frames makes latency worse |
+
+### What Happens If You Ignore This
+
+| Wrong Policy | Symptom |
+|--------------|---------|
+| Deep buffering | Touch lag, UI feels unresponsive |
+| Decoding late frames | Ghosting, smearing, visual trails |
+| Not resetting on corruption | Artifacts persist and worsen |
+| Enforcing fixed FPS | Stuttering, artificial pacing delays |
+| Trying to "catch up" | Latency grows until unusable |
+
+### Recommended Video Architecture
+
+```
+USB Read Thread
+    │
+    ▼
+Jitter Buffer (shallow: 100-200ms max, ~10-12 packets)
+    │
+    ├── Frame arrives late? → DROP (unless IDR)
+    │
+    ├── Buffer full? → Skip to newest IDR
+    │
+    ▼
+Decoder (feed immediately, don't wait)
+    │
+    ├── Corruption detected? → RESET + request keyframe
+    │
+    ▼
+Render ASAP (don't pace to PTS)
+```
 
 ---
 
@@ -35,6 +115,8 @@ A host application communicates with the CPC200-CCPA adapter via USB to:
 
 ### 2. Initialization Sequence (CRITICAL)
 
+**IMPORTANT:** The adapter has a ~10-second watchdog timer from USB connection. Both init messages AND the first heartbeat must complete within this window.
+
 ```
 1. USB Reset (clear partially configured state)
 
@@ -44,12 +126,13 @@ A host application communicates with the CPC200-CCPA adapter via USB to:
 
 4. Open USB connection
 
-5. START HEARTBEAT FIRST (CRITICAL!)
-   - Must start BEFORE sending init messages
+5. START HEARTBEAT TIMER (but do NOT send immediately!)
+   - Start timer BEFORE sending init messages
    - Interval: 2 seconds
-   - Message: HeartBeat (0xAA)
+   - First heartbeat will fire at t=2000ms (AFTER init completes)
+   - Do NOT send heartbeat at t=0
 
-6. Send initialization messages:
+6. Send initialization messages (~1.5s total with 120ms delays):
    a. SendFile /tmp/screen_dpi
    b. Open (resolution, fps, format)
    c. SendFile /tmp/night_mode
@@ -58,6 +141,19 @@ A host application communicates with the CPC200-CCPA adapter via USB to:
    f. Command messages as needed
 
 7. Start reading loop
+
+8. First heartbeat fires automatically at t=2000ms
+```
+
+**Timeline:**
+```
+t=0ms     → USB open, heartbeat timer started
+t=0ms     → SendFile /tmp/screen_dpi
+t=120ms   → Open message
+...
+t=~1500ms → Init complete
+t=2000ms  → First heartbeat (timer fires)
+t=4000ms  → Second heartbeat
 ```
 
 ### 3. Message Processing Loop
@@ -107,11 +203,15 @@ heartbeatTimer.cancel()
 
 **IMPORTANT:** The adapter does NOT decode or transcode video. It forwards H.264 passthrough with USB headers prepended. Your host application MUST perform H.264 decoding.
 
+**CRITICAL:** This is projection video (live UI), not media playback. See "Video: Projection Model" section above.
+
 ### Video Architecture (Binary Verified)
 
 ```
-Phone (CarPlay/AA)  →  Adapter (Forward Only)  →  Host App (Decode)
+Phone (CarPlay/AA)  →  Adapter (Forward Only)  →  Host App (Decode + Policy)
      H.264 stream       Add 36-byte header          MediaCodec/FFmpeg
+                        No buffering                Drop late frames
+                        No policy                   Reset on corruption
 ```
 
 The adapter:
@@ -119,20 +219,36 @@ The adapter:
 - Parses NAL units for keyframe detection only
 - Prepends USB header (16 bytes) + video metadata (20 bytes)
 - Forwards unchanged H.264 payload to USB
+- **Makes no timing or quality decisions**
 
-### Receiving Video Frames
+### Receiving Video Frames (Projection Model)
 
-```
+```kotlin
 if (msg_type == 0x06) {
     width = payload[0:4]
     height = payload[4:8]
     pts = payload[12:16]
     h264_data = payload[20:]  // Raw H.264 NAL units (Annex B format)
 
-    // Host MUST decode H.264 - adapter does NOT decode
+    // PROJECTION MODEL: Check staleness before decoding
+    val frameAge = measureFrameAge(pts)  // Time since frame was sent
+
+    if (frameAge > STALE_THRESHOLD_MS && !isIdrFrame(h264_data)) {
+        // Late P-frame: DROP IT - decoding would poison references
+        return
+    }
+
+    // IDR frames: Always decode (they reset reference state)
+    // Current frames: Decode immediately
     decoder.decode(h264_data, pts)
 }
+
+// Recommended thresholds:
+// STALE_THRESHOLD_MS = 30-40ms (based on jitter analysis: 85% of frames within ±40ms)
+// Balance needed: too long causes decoder poisoning, too short drops valid frames
 ```
+
+**Warning:** The PTS in the header is stream-relative (starts near 0 when session begins), NOT wall-clock time. To measure staleness, track arrival time separately or establish a PTS-to-wallclock offset on first frame.
 
 ### Keyframe Recovery
 
@@ -454,7 +570,13 @@ fun enableAndroidAutoMode() {
 
 ### Advanced File Operations (SendFile 0x99)
 
-SendFile has **no path validation** - any writable path is accessible. The root filesystem is mounted read-write.
+**⚠️ SECURITY WARNING:** SendFile has **no path validation or sanitization**:
+- Any writable path is accessible (root filesystem is mounted read-write)
+- No path traversal (`../`) filtering
+- No whitelist enforcement
+- If your host application is compromised, an attacker could overwrite system files
+
+**Secure Implementation Note:** If accepting user-provided paths, validate them thoroughly before passing to SendFile.
 
 #### Writable Paths (Live Verified Jan 2026)
 
@@ -561,9 +683,14 @@ To enable CarPlay Dashboard/navigation video:
 | Error | Recovery |
 |-------|----------|
 | USB disconnect | Stop heartbeat, close interface, retry |
-| projectionDisconnected (0x3F2) | Full restart sequence |
+| Unplugged (0x04) | Full restart sequence (phone disconnected) |
 | Phase stuck at 7 | Wait or timeout and retry |
 | No heartbeat response | Reset USB and restart |
+
+**⚠️ CRITICAL (Binary Verified Feb 2026):** Do NOT treat Command 1010 (DeviceWifiNotConnected) as a disconnect signal. This is a WiFi hotspot status notification only - it means no phone is connected to the adapter's WiFi. For USB CarPlay sessions, this message is irrelevant since all video/audio flows over USB, not WiFi. The correct session termination signals are:
+- `Unplugged` (0x04) - Phone disconnected from adapter
+- `Phase` (0x03) with value 0 - Session ended
+- Heartbeat timeout - Communication lost
 
 ### Video Errors
 
@@ -572,6 +699,22 @@ To enable CarPlay Dashboard/navigation video:
 | Decode failure | Send Frame (0x0C) for IDR |
 | No video data | Check Phase is 8 |
 | Resolution mismatch | Re-send Open message |
+
+### Video Corruption (Projection-Specific)
+
+| Symptom | Cause | Recovery |
+|---------|-------|----------|
+| Ghosting/smearing | Decoder reference poisoning | Reset decoder + request IDR |
+| Progressive degradation | Late frames being decoded | Tighten staleness threshold |
+| Corruption persists after IDR | Decoder state fully poisoned | Full decoder recreation |
+| Latency grows over time | Buffer accumulation | Drop more aggressively |
+| Artifacts "stick" to motion | Reference contamination | Immediate reset |
+
+**Key Rule:** If corruption survives one IDR frame, the decoder state is poisoned. Reset immediately — don't wait for it to heal.
+
+**Decoder Reset Strategy (Platform-Specific):**
+- Most decoders: `flush()` + wait for next IDR
+- Intel VPU (OMX.Intel.hw_vd.h264): Requires full codec recreation (flush is insufficient)
 
 ### Audio Errors
 

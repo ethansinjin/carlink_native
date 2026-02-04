@@ -7,6 +7,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.graphics.Color
@@ -79,6 +80,12 @@ private val LightColorScheme =
         onErrorContainer = Color(0xFF410002),
         surface = Color(0xFFF5FAFB),
         onSurface = Color(0xFF171D1E),
+        // Surface container colors for cards and elevated surfaces (teal-tinted)
+        surfaceContainerLowest = Color(0xFFFFFFFF),
+        surfaceContainerLow = Color(0xFFEFF5F6),
+        surfaceContainer = Color(0xFFE9EFF0),
+        surfaceContainerHigh = Color(0xFFE3EAEB),
+        surfaceContainerHighest = Color(0xFFDDE4E6),
         surfaceVariant = Color(0xFFDBE4E6),
         onSurfaceVariant = Color(0xFF3F484A),
         outline = Color(0xFF6F797A),
@@ -92,7 +99,7 @@ private val LightColorScheme =
 /** Material 3 theme with automotive-optimized colors and typography. */
 @Composable
 fun CarlinkTheme(
-    darkTheme: Boolean = true, // Default to dark for automotive
+    darkTheme: Boolean = isSystemInDarkTheme(), // Follow AAOS system theme
     dynamicColor: Boolean = false, // Disabled for consistent branding
     content: @Composable () -> Unit,
 ) {

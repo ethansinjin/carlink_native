@@ -2,7 +2,8 @@
 
 **Status:** Documented from binary analysis
 **Source:** ARMadb-driver_unpacked, ARMiPhoneIAP2_unpacked binary analysis
-**Last Updated:** 2026-01-20 (added CallQuality bug documentation)
+**Firmware Version:** 2025.10.15.1127 (binary analysis reference version)
+**Last Updated:** 2026-02-02 (added legacy note for decode_type=3, explicit failure mode warning)
 
 ---
 
@@ -19,8 +20,8 @@ The adapter uses a `decodeType` value (4-byte LE integer) in AudioData messages 
 | decodeType | Sample Rate | Channels | Bits | Use Case |
 |------------|-------------|----------|------|----------|
 | 1 | 44100 Hz | 2 (stereo) | 16 | Media playback (44.1kHz CD quality) |
-| 2 | 44100 Hz | 2 (stereo) | 16 | Navigation / Stop commands |
-| 3 | 8000 Hz | 1 (mono) | 16 | Phone call (narrow-band) |
+| 2 | 44100 Hz | 2 (stereo) | 16 | 44.1kHz media OR stop/cleanup commands (dual-purpose) |
+| 3 | 8000 Hz | 1 (mono) | 16 | Phone call narrow-band **(LEGACY - not observed in modern implementations, CarPlay uses 16kHz)** |
 | 4 | 48000 Hz | 2 (stereo) | 16 | Media HD / Standard CarPlay |
 | 5 | 16000 Hz | 1 (mono) | 16 | Siri / Phone / Mic input |
 | 6 | 24000 Hz | 1 (mono) | 16 | Voice recognition |
@@ -109,7 +110,7 @@ Expected Mic Format (WebRTC validated):
 - **8000 Hz** (0x1F40) - narrowband voice
 - **16000 Hz** (0x3E80) - wideband voice
 
-Any other sample rate will cause WebRTC AECM initialization to fail.
+**FAILURE MODE:** Using any sample rate other than 8kHz or 16kHz for microphone input will cause WebRTC AECM initialization to fail. This is a **HARD REQUIREMENT** - the firmware will reject the audio and may cause session termination or silent mic failure.
 
 ### Dynamic Sample Rate Configuration
 

@@ -41,7 +41,7 @@ data class AudioConfig(
         /** ARM platforms. FAST track available, 4x buffer, 80ms prefill (P99 jitter ~7ms). */
         val DEFAULT =
             AudioConfig(
-                sampleRate = 44100,
+                sampleRate = 48000,
                 bufferMultiplier = 4,
                 performanceMode = AudioTrack.PERFORMANCE_MODE_LOW_LATENCY,
                 prefillThresholdMs = 80,

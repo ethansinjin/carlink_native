@@ -235,12 +235,10 @@ object Logger {
         message: String,
         throwable: Throwable? = null,
     ) {
-        if (level.priority < minLevel.priority) return
-        if (tag != null && !isTagEnabled(tag)) return
-
         val timestamp = System.currentTimeMillis()
         val formattedMessage = if (tag != null) "[$tag] $message" else message
 
+        // Always emit to Logcat regardless of app settings (enables adb logcat capture)
         when (level) {
             Level.VERBOSE -> Log.v(TAG, formattedMessage, throwable)
             Level.DEBUG -> Log.d(TAG, formattedMessage, throwable)
@@ -248,6 +246,10 @@ object Logger {
             Level.WARN -> Log.w(TAG, formattedMessage, throwable)
             Level.ERROR -> Log.e(TAG, formattedMessage, throwable)
         }
+
+        // Apply filtering only for listeners (file logging, etc.)
+        if (level.priority < minLevel.priority) return
+        if (tag != null && !isTagEnabled(tag)) return
 
         for (listener in listeners) {
             try {

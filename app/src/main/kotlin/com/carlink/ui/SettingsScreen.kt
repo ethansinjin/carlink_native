@@ -65,7 +65,6 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.PhoneAndroid
-import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.PhoneDisabled
 import androidx.compose.material.icons.filled.PhoneInTalk
 import androidx.compose.material.icons.filled.PowerOff
@@ -78,6 +77,7 @@ import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Usb
 import androidx.compose.material.icons.filled.VideoSettings
+import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.AlertDialog
@@ -139,9 +139,8 @@ import com.carlink.ui.settings.DisplayMode
 import com.carlink.ui.settings.DisplayModePreference
 import com.carlink.ui.settings.MicSourceConfig
 import com.carlink.ui.settings.SettingsTab
+import com.carlink.ui.settings.VideoResolutionConfig
 import com.carlink.ui.settings.WiFiBandConfig
-import com.carlink.ui.settings.CapturePlaybackContent
-import com.carlink.ui.settings.CaptureRecordingCard
 import com.carlink.ui.theme.AutomotiveDimens
 import kotlinx.coroutines.launch
 import java.io.File
@@ -154,7 +153,6 @@ import java.util.Locale
 fun SettingsScreen(
     carlinkManager: CarlinkManager,
     fileLogManager: FileLogManager?,
-    capturePlaybackManager: com.carlink.capture.CapturePlaybackManager,
     onNavigateBack: () -> Unit,
 ) {
     var selectedTab by remember { mutableStateOf(SettingsTab.CONTROL) }
@@ -293,8 +291,6 @@ fun SettingsScreen(
                 when (selectedTab) {
                     SettingsTab.CONTROL -> ControlTabContent(carlinkManager, debugModePreference)
                     SettingsTab.LOGS -> LogsTabContent(context, fileLogManager)
-                    SettingsTab.PLAYBACK -> PlaybackTabContent(carlinkManager, capturePlaybackManager, onNavigateBack)
-                    SettingsTab.RECORD -> RecordTabContent(carlinkManager)
                 }
             }
         }
@@ -511,6 +507,7 @@ private fun ControlTabContent(
         AdapterConfigurationDialog(
             adapterConfigPreference = adapterConfigPreference,
             carlinkManager = carlinkManager,
+            currentDisplayMode = currentDisplayMode,
             onDismiss = { showAdapterConfigDialog = false },
         )
     }
@@ -586,7 +583,7 @@ private fun ControlCard(
 
 /**
  * Developer Options Card with debug mode toggle.
- * When enabled, shows advanced tabs (Logs, Playback, Record) in the NavigationRail.
+ * When enabled, shows the Logs tab in the NavigationRail.
  */
 @Composable
 private fun DeveloperOptionsCard(
@@ -629,7 +626,7 @@ private fun DeveloperOptionsCard(
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Enable advanced tabs: Logs, Playback, Record",
+                    text = "Enable the Logs tab",
                     style = MaterialTheme.typography.bodyMedium,
                     color = colorScheme.onSurfaceVariant,
                     maxLines = 2,
@@ -810,6 +807,7 @@ private fun ControlButton(
 private fun AdapterConfigurationDialog(
     adapterConfigPreference: AdapterConfigPreference,
     carlinkManager: CarlinkManager?,
+    currentDisplayMode: DisplayMode,
     onDismiss: () -> Unit,
 ) {
     val colorScheme = MaterialTheme.colorScheme
@@ -828,18 +826,67 @@ private fun AdapterConfigurationDialog(
     val savedCallQuality by adapterConfigPreference.callQualityFlow.collectAsStateWithLifecycle(
         initialValue = CallQualityConfig.DEFAULT,
     )
+    val savedVideoResolution by adapterConfigPreference.videoResolutionFlow.collectAsStateWithLifecycle(
+        initialValue = VideoResolutionConfig.AUTO,
+    )
+
+    // Get usable display dimensions based on current display mode
+    // FULLSCREEN_IMMERSIVE: Use full display bounds (bars are hidden)
+    // Other modes: Subtract system bar insets from bounds
+    val context = LocalContext.current
+    val activity = context as? ComponentActivity
+    val windowManager = activity?.windowManager
+    val (usableWidth, usableHeight) = if (windowManager != null) {
+        val windowMetrics = windowManager.currentWindowMetrics
+        val bounds = windowMetrics.bounds
+
+        when (currentDisplayMode) {
+            DisplayMode.FULLSCREEN_IMMERSIVE -> {
+                // Full display - no insets subtracted
+                Pair(bounds.width() and 1.inv(), bounds.height() and 1.inv())
+            }
+            DisplayMode.STATUS_BAR_HIDDEN -> {
+                // Only subtract navigation bar (bottom), not status bar
+                val insets = windowMetrics.windowInsets.getInsetsIgnoringVisibility(
+                    android.view.WindowInsets.Type.navigationBars()
+                )
+                val w = bounds.width() - insets.left - insets.right
+                val h = bounds.height() - insets.bottom
+                Pair(w and 1.inv(), h and 1.inv())
+            }
+            DisplayMode.SYSTEM_UI_VISIBLE -> {
+                // Subtract all system bar insets
+                val insets = windowMetrics.windowInsets.getInsetsIgnoringVisibility(
+                    android.view.WindowInsets.Type.systemBars() or
+                        android.view.WindowInsets.Type.displayCutout()
+                )
+                val w = bounds.width() - insets.left - insets.right
+                val h = bounds.height() - insets.top - insets.bottom
+                Pair(w and 1.inv(), h and 1.inv())
+            }
+        }
+    } else {
+        Pair(0, 0)
+    }
+    val resolutionOptions = if (usableWidth > 0 && usableHeight > 0) {
+        VideoResolutionConfig.calculateOptions(usableWidth, usableHeight)
+    } else {
+        emptyList()
+    }
 
     // Local state for editing - allows cancel without saving
     var selectedAudioSource by remember { mutableStateOf(savedAudioSource) }
     var selectedMicSource by remember { mutableStateOf(savedMicSource) }
     var selectedWifiBand by remember { mutableStateOf(savedWifiBand) }
     var selectedCallQuality by remember { mutableStateOf(savedCallQuality) }
+    var selectedVideoResolution by remember { mutableStateOf(savedVideoResolution) }
 
     // Sync local state when saved value loads (for initial load)
     LaunchedEffect(savedAudioSource) { selectedAudioSource = savedAudioSource }
     LaunchedEffect(savedMicSource) { selectedMicSource = savedMicSource }
     LaunchedEffect(savedWifiBand) { selectedWifiBand = savedWifiBand }
     LaunchedEffect(savedCallQuality) { selectedCallQuality = savedCallQuality }
+    LaunchedEffect(savedVideoResolution) { selectedVideoResolution = savedVideoResolution }
 
     // Track if any changes were made
     // All adapter configuration changes require app restart
@@ -847,7 +894,8 @@ private fun AdapterConfigurationDialog(
         selectedAudioSource != savedAudioSource ||
             selectedMicSource != savedMicSource ||
             selectedWifiBand != savedWifiBand ||
-            selectedCallQuality != savedCallQuality
+            selectedCallQuality != savedCallQuality ||
+            selectedVideoResolution != savedVideoResolution
 
     // Responsive dialog width - 60% of container width, clamped between 320dp and 600dp
     val windowInfo = LocalWindowInfo.current
@@ -1065,6 +1113,87 @@ private fun AdapterConfigurationDialog(
                             color = colorScheme.primary,
                         )
                     }
+
+                    // Video Resolution Configuration
+                    ConfigurationOptionCard(
+                        title = "Video Resolution",
+                        description = "Select resolution for CarPlay/Android Auto projection",
+                        icon = Icons.Default.AspectRatio,
+                    ) {
+                        // Auto option button
+                        val autoLabel = if (usableWidth > 0 && usableHeight > 0) {
+                            "Auto (${usableWidth}x$usableHeight)"
+                        } else {
+                            "Auto"
+                        }
+
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            // Auto button - full width
+                            ResolutionButton(
+                                label = autoLabel,
+                                isSelected = selectedVideoResolution.isAuto,
+                                isRecommended = true,
+                                onClick = { selectedVideoResolution = VideoResolutionConfig.AUTO },
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+
+                            // Resolution options - 2x2 grid
+                            if (resolutionOptions.isNotEmpty()) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    resolutionOptions.take(2).forEach { option ->
+                                        ResolutionButton(
+                                            label = "${option.width}x${option.height}",
+                                            isSelected = selectedVideoResolution == option,
+                                            isRecommended = false,
+                                            onClick = { selectedVideoResolution = option },
+                                            modifier = Modifier.weight(1f),
+                                        )
+                                    }
+                                }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    resolutionOptions.drop(2).take(2).forEach { option ->
+                                        ResolutionButton(
+                                            label = "${option.width}x${option.height}",
+                                            isSelected = selectedVideoResolution == option,
+                                            isRecommended = false,
+                                            onClick = { selectedVideoResolution = option },
+                                            modifier = Modifier.weight(1f),
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = if (selectedVideoResolution.isAuto) {
+                                "Uses detected display resolution"
+                            } else {
+                                "Lower resolutions reduce GPU load"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colorScheme.primary,
+                        )
+
+                        // Android Auto warning for low resolutions
+                        if (!selectedVideoResolution.isAuto && selectedVideoResolution.height < 720) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Note: Android Auto will use 800x480 at this resolution",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colorScheme.error,
+                            )
+                        }
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(24.dp))
@@ -1102,13 +1231,14 @@ private fun AdapterConfigurationDialog(
                     // Apply & Restart button - all adapter config changes require restart
                     Button(
                         onClick = {
-                            logWarn("[UI_ACTION] Adapter Config: Apply & Restart clicked - audio=$selectedAudioSource, mic=$selectedMicSource, wifi=$selectedWifiBand, callQuality=$selectedCallQuality", tag = "UI")
+                            logWarn("[UI_ACTION] Adapter Config: Apply & Restart clicked - audio=$selectedAudioSource, mic=$selectedMicSource, wifi=$selectedWifiBand, callQuality=$selectedCallQuality, resolution=${selectedVideoResolution.toStorageString()}", tag = "UI")
                             scope.launch {
                                 // Save all configuration
                                 adapterConfigPreference.setAudioSource(selectedAudioSource)
                                 adapterConfigPreference.setMicSource(selectedMicSource)
                                 adapterConfigPreference.setWifiBand(selectedWifiBand)
                                 adapterConfigPreference.setCallQuality(selectedCallQuality)
+                                adapterConfigPreference.setVideoResolution(selectedVideoResolution)
 
                                 // All adapter config changes require restart
                                 carlinkManager?.stop()
@@ -1272,6 +1402,76 @@ private fun AudioSourceButton(
                 maxLines = 1,
                 overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
             )
+        }
+    }
+}
+
+/**
+ * Resolution Selection Button
+ *
+ * Compact button for resolution selection with optional "Recommended" badge.
+ */
+@Composable
+private fun ResolutionButton(
+    label: String,
+    isSelected: Boolean,
+    isRecommended: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colorScheme = MaterialTheme.colorScheme
+
+    val backgroundColor by animateColorAsState(
+        targetValue = if (isSelected) colorScheme.primaryContainer else colorScheme.surfaceContainer,
+        label = "backgroundColor",
+    )
+    val borderWidth by animateDpAsState(
+        targetValue = if (isSelected) 2.dp else 1.dp,
+        label = "borderWidth",
+    )
+    val borderColor by animateColorAsState(
+        targetValue = if (isSelected) colorScheme.primary else colorScheme.outline,
+        label = "borderColor",
+    )
+    val contentColor by animateColorAsState(
+        targetValue = if (isSelected) colorScheme.primary else colorScheme.onSurfaceVariant,
+        label = "contentColor",
+    )
+
+    Surface(
+        onClick = onClick,
+        modifier = modifier.height(48.dp),
+        shape = MaterialTheme.shapes.medium,
+        color = backgroundColor,
+        border = BorderStroke(
+            width = borderWidth,
+            color = borderColor,
+        ),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelLarge.copy(
+                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                ),
+                color = contentColor,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            )
+            if (isRecommended && !isSelected) {
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = "(Rec)",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colorScheme.tertiary,
+                )
+            }
         }
     }
 }
@@ -2111,120 +2311,6 @@ private fun LogsTabContent(
                     }
                 }
             }
-        }
-    }
-}
-
-/**
- * Playback tab content - Capture playback settings and controls.
- */
-@Composable
-private fun PlaybackTabContent(
-    carlinkManager: CarlinkManager,
-    capturePlaybackManager: com.carlink.capture.CapturePlaybackManager,
-    onNavigateBack: () -> Unit,
-) {
-    val colorScheme = MaterialTheme.colorScheme
-
-    // Responsive max width - 75% of container width, clamped between 400dp and 1200dp
-    val windowInfo = LocalWindowInfo.current
-    val density = LocalDensity.current
-    val containerWidthDp = with(density) { windowInfo.containerSize.width.toDp() }
-    val maxContentWidth = (containerWidthDp * 0.75f).coerceIn(400.dp, 1200.dp)
-
-    Box(
-        modifier = Modifier.fillMaxSize(),
-        contentAlignment = Alignment.TopCenter,
-    ) {
-        Column(
-            modifier =
-                Modifier
-                    .widthIn(max = maxContentWidth)
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
-                    .padding(24.dp),
-            verticalArrangement = Arrangement.spacedBy(24.dp),
-        ) {
-            CapturePlaybackContent(
-                carlinkManager = carlinkManager,
-                capturePlaybackManager = capturePlaybackManager,
-                onStartPlayback = {
-                    // Navigate back to main screen to start playback
-                    onNavigateBack()
-                },
-            )
-        }
-    }
-}
-
-@Composable
-private fun RecordTabContent(carlinkManager: CarlinkManager) {
-    val colorScheme = MaterialTheme.colorScheme
-
-    // Responsive max width - 75% of container width, clamped between 400dp and 1200dp
-    val windowInfo = LocalWindowInfo.current
-    val density = LocalDensity.current
-    val containerWidthDp = with(density) { windowInfo.containerSize.width.toDp() }
-    val maxContentWidth = (containerWidthDp * 0.75f).coerceIn(400.dp, 1200.dp)
-
-    Box(
-        modifier = Modifier.fillMaxSize(),
-        contentAlignment = Alignment.TopCenter,
-    ) {
-        Column(
-            modifier =
-                Modifier
-                    .widthIn(max = maxContentWidth)
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
-                    .padding(24.dp),
-            verticalArrangement = Arrangement.spacedBy(24.dp),
-        ) {
-            // Storage warning card
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = MaterialTheme.shapes.medium,
-                color = colorScheme.tertiaryContainer.copy(alpha = 0.6f),
-                border = BorderStroke(1.dp, colorScheme.tertiary.copy(alpha = 0.5f)),
-            ) {
-                Row(
-                    modifier = Modifier.padding(16.dp),
-                    verticalAlignment = Alignment.Top,
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Warning,
-                        contentDescription = null,
-                        tint = colorScheme.tertiary,
-                        modifier = Modifier.size(24.dp),
-                    )
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "Large File Warning",
-                            style = MaterialTheme.typography.titleSmall.copy(
-                                fontWeight = FontWeight.SemiBold,
-                            ),
-                            color = colorScheme.onTertiaryContainer,
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "Recording captures raw video and audio data. Depending on frame size and session length, binary files can easily exceed 500 MB or reach several GBs.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = colorScheme.onTertiaryContainer.copy(alpha = 0.9f),
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "It is recommended to record directly onto external storage.",
-                            style = MaterialTheme.typography.bodySmall.copy(
-                                fontWeight = FontWeight.Medium,
-                            ),
-                            color = colorScheme.onTertiaryContainer,
-                        )
-                    }
-                }
-            }
-
-            CaptureRecordingCard(carlinkManager = carlinkManager)
         }
     }
 }

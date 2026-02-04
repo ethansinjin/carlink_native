@@ -19,7 +19,7 @@ private val Context.debugModeDataStore: DataStore<Preferences> by preferencesDat
 /**
  * Debug mode preference with DataStore + SharedPreferences sync cache.
  *
- * Controls visibility of developer tabs (Logs, Playback, Record) in Settings.
+ * Controls visibility of the Logs tab in Settings.
  * Default: OFF (only Control tab visible)
  */
 @Suppress("StaticFieldLeak")

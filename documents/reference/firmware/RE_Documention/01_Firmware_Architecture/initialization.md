@@ -1,8 +1,8 @@
 # CPC200-CCPA Firmware Initialization & Boot Sequence
 
 **Source:** Extracted firmware analysis
-**Firmware:** 2025.10.XX
-**Last Updated:** 2026-01-20
+**Firmware Version:** 2025.10.15.1127 (binary analysis reference version)
+**Last Updated:** 2026-02-02
 
 ---
 
@@ -14,16 +14,23 @@ This document covers the adapter's boot process and host initialization message 
 
 ## Host Initialization Sequence
 
-The host application sends the following messages after USB connection:
+The host application sends the following messages after USB connection.
+
+**CRITICAL:** The adapter has a ~10-second watchdog timer. Both init AND first heartbeat must complete within this window.
 
 ```
 1. USB Reset (clear partially configured state)
 2. 3-second mandatory wait
 3. Open USB connection
-4. START HEARTBEAT (see heartbeat_analysis.md)
-5. Send initialization messages (below)
+4. START HEARTBEAT TIMER (do NOT send heartbeat immediately!)
+   - Timer starts, first heartbeat fires after 2000ms interval
+   - See heartbeat_analysis.md for details
+5. Send initialization messages (below) - takes ~1.5s
 6. Start reading loop
+7. First heartbeat fires at t=2000ms (after init completes)
 ```
+
+**Note:** Do NOT send heartbeat at t=0. The timer should start before init, but the first heartbeat should fire AFTER the init messages are sent. This matches the working pattern in pi-carplay and carlink_native.
 
 ### Initialization Messages
 

@@ -1,5 +1,6 @@
 package com.carlink.protocol
 
+import com.carlink.audio.AudioFormats
 import com.carlink.logging.logWarn
 import org.json.JSONException
 import org.json.JSONObject
@@ -352,7 +353,7 @@ class AudioDataMessage(
 ) : Message(header) {
     override fun toString(): String {
         val format = AudioFormats.fromDecodeType(decodeType)
-        val formatInfo = format?.let { "${it.frequency}Hz ${it.channels}ch" } ?: "unknown"
+        val formatInfo = "${format.sampleRate}Hz ${format.channelCount}ch"
         return when {
             command != null -> "AudioData(command=${command.name})"
             volumeDuration != null -> "AudioData(volumeDuration=$volumeDuration)"

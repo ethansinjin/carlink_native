@@ -83,6 +83,9 @@ public class AppExecutors
         private final ThreadPoolExecutor executor;
         private final int androidPriority;
 
+        // Track which threads have had priority set (thread-local for efficiency)
+        private final ThreadLocal<Boolean> prioritySet = ThreadLocal.withInitial(() -> false);
+
         private OptimizedMediaCodecExecutor(String executorName, int androidPriority) {
             // Get available CPU cores for Intel Atom x7-A3960 (should be 4)
             int numberOfCores = Runtime.getRuntime().availableProcessors();
@@ -97,7 +100,6 @@ public class AppExecutors
                     new LinkedBlockingQueue<>(128), // Larger queue for 6GB RAM system
                     r -> {
                         Thread t = new Thread(r, executorName);
-                        // Don't set Thread priority here - it will be set in the execute method
                         return t;
                     }
             );
@@ -107,9 +109,12 @@ public class AppExecutors
 
         @Override
         public void execute(@NonNull Runnable command) {
-            // Wrap command to set Android thread priority properly
             executor.execute(() -> {
-                Process.setThreadPriority(androidPriority);
+                // Set thread priority only once per thread (avoids syscall overhead)
+                if (!prioritySet.get()) {
+                    Process.setThreadPriority(androidPriority);
+                    prioritySet.set(true);
+                }
                 command.run();
             });
         }

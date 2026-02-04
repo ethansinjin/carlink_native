@@ -1,8 +1,55 @@
 # CPC200-CCPA Video Protocol Reference
 
 **Status:** VERIFIED via capture analysis and binary reverse engineering
-**Consolidated from:** GM_research, carlink_native, binary analysis
-**Last Updated:** 2026-01-19
+**Consolidated from:** GM_research, carlink_native, binary analysis, 215K frame aggregate analysis
+**Firmware Version:** 2025.10.15.1127 (binary analysis reference version)
+**Last Updated:** 2026-02-02 (Fixed navigation video header documentation)
+
+---
+
+## Critical: Video Stream Characteristics
+
+**CarPlay/Android Auto video is NOT traditional video playback.**
+
+It is **live UI projection** — a real-time stream of the phone's screen state transmitted via H.264 encoding. This distinction is critical for host application design.
+
+| Characteristic | Traditional Video | Projection Video (CarPlay/AA) |
+|----------------|-------------------|-------------------------------|
+| Content | Pre-recorded media | Live, interactive UI |
+| Frame value | All frames matter | Only current frame matters |
+| Late frames | Buffer and play later | **Discard immediately** |
+| Buffering | Deep buffers improve quality | Deep buffers cause latency |
+| Goal | Smooth playback | Low latency response |
+| FPS | Fixed (24/30/60) | Variable (1-60 fps) |
+| User expectation | Watch passively | Touch and interact |
+
+### Host Application Requirements
+
+**DO:**
+- Decode frames immediately upon arrival
+- Drop frames that arrive late (>30-40ms old) - balance needed: too long causes decoder poisoning, too short drops valid frames
+- Reset decoder on corruption — don't wait for it to heal
+- Keep buffers shallow (100-200ms jitter absorption only)
+- Accept frame drops as normal operation
+
+**DO NOT:**
+- Buffer deeply for "smooth playback"
+- Try to "catch up" by playing through a backlog
+- Enforce fixed FPS targets
+- Wait for missing frames
+- Treat PTS as authoritative ordering
+
+> **A late frame in projection video is worse than a dropped frame.**
+> Late frames poison decoder reference state and create visual corruption.
+
+### Why This Matters
+
+The adapter forwards video **exactly as received** from the phone. If your host app:
+- Buffers too deeply → latency grows, touch feels laggy
+- Decodes late frames → decoder reference state corrupts → ghosting, smearing
+- Doesn't reset on corruption → artifacts persist and amplify
+
+**The adapter cannot fix host app policy errors.**
 
 ---
 
@@ -79,6 +126,10 @@ PTS 146883+:       0x00000007 (normal streaming)
 
 **Total Header: 36 bytes** (16-byte USB header + 20-byte video header)
 
+**⚠️ Binary Verification (Feb 2026):** Type 0x2C = `AltVideoFrame` (navigation video).
+Type 0x2B is `Connection_PINCODE` (BT pairing PIN), NOT a video type.
+Verified from firmware switch statement at fcn.00017b74.
+
 **IMPORTANT:** Navigation video uses the SAME header structure as main video.
 
 ```
@@ -130,7 +181,7 @@ PTS 146883+:       0x00000007 (normal streaming)
 | Type | Purpose | Example Resolution |
 |------|---------|-------------------|
 | 110 | Main screen video | 1200×480 @ 60 FPS |
-| 111 | Alt screen (cluster/navigation) | 1000×400 @ 24 FPS |
+| 111 | Alt screen (cluster/navigation) | 1000×400 @ 24 FPS (configurable 10-60, recommended 24-60) |
 
 **TTY Log Evidence (Jan 2026 Wireless CarPlay Capture):**
 ```
@@ -590,14 +641,17 @@ PPS: 28ee3cb0 (4 bytes)
 | Effective FPS | 12.5 fps |
 | First frame | 7524ms into session |
 
-**Navigation Video Header (12 bytes):**
+**Navigation Video Header (20 bytes - same structure as main video):**
 ```
-Offset  Size  Field       Example
-------  ----  -----       -------
-0x00    4     Width       1200 (0x04B0)
-0x04    4     Height      500 (0x01F4)
-0x08    4     Flags       1
+Offset  Size  Field         Example
+------  ----  -----         -------
+0x10    4     Width         1200 (0x04B0)
+0x14    4     Height        500 (0x01F4)
+0x18    4     TotalSize     Frame data size
+0x1C    4     FrameSize     H.264 NAL unit size
+0x20    4     Flags         EncoderState (see above)
 ```
+Note: Offsets are relative to USB message start (16-byte USB header + 20-byte video header = 36 bytes total).
 
 **H.264 Codec Parameters:**
 ```
@@ -790,9 +844,147 @@ The adapter logs video/audio frame rates every 10 seconds:
 
 ---
 
+## Quantitative Stream Analysis (Aggregate Data)
+
+**Source:** Analysis of 215,191 video frames across 10 recording sessions (133.7 minutes total).
+
+This section provides definitive, measured stream behavior based on comprehensive capture analysis. For complete frame-by-frame data, see `/documents/video_code_reasoning/17_USB_CAPTURE_STREAM_ANALYSIS.md`.
+
+### Session Start Behavior (VERIFIED)
+
+```
+FINDING: 100% of sessions begin with SPS+PPS+IDR bundle
+STATUS:  Verified across all 10 captures (10/10)
+```
+
+**First packet structure (every session):**
+```
+[USB Header: 16B] + [Video Header: 20B] + [SPS: 22B] + [PPS: 4B] + [IDR: ~43KB]
+```
+
+**Implication:** No need to request keyframe at session start. Decoder can initialize immediately on first packet.
+
+### SPS/PPS Bundling Rule (CRITICAL)
+
+```
+FINDING: SPS and PPS are NEVER sent as standalone packets
+         They are ALWAYS bundled with IDR in a single USB packet
+STATUS:  Verified across 538+ IDR frames
+```
+
+| Pattern | Occurrence | Description |
+|---------|------------|-------------|
+| `[P-slice]` | ~97% | Standard P-frame packet |
+| `[SPS → PPS → IDR]` | ~3% | Complete keyframe bundle |
+| `[SPS]` standalone | 0% | **Never occurs** |
+| `[PPS]` standalone | 0% | **Never occurs** |
+
+**Implication:** Every IDR is self-contained. No need to cache SPS/PPS separately for normal operation.
+
+### IDR (Keyframe) Periodicity
+
+| Metric | Value |
+|--------|-------|
+| Minimum interval | 83ms (burst recovery from keyframe request) |
+| Maximum interval | 2,117ms |
+| Average interval | 2,031ms |
+| **Median interval** | **2,000ms** |
+
+**Distribution (538 intervals analyzed):**
+
+| Interval Range | Percentage | Meaning |
+|----------------|------------|---------|
+| < 500ms | 7.3% | Keyframe requests honored |
+| 1.5 - 2s | 21.7% | Typical GOP |
+| **2 - 2.5s** | **66.4%** | **Standard ~2s GOP** |
+| > 2.5s | 0.4% | Rare long gap |
+
+### Frame Timing and Jitter
+
+**PTS Delta Distribution (frame-to-frame intervals):**
+
+| Interval | Equiv FPS | Occurrence | UI Activity |
+|----------|-----------|------------|-------------|
+| 16-17ms | 58-62 fps | 55.7% | Active animations |
+| 33-34ms | 29-30 fps | 11.9% | Moderate activity |
+| 50ms | 20 fps | 30.6% | Light updates |
+| 100ms+ | ≤10 fps | ~2% | Static/idle screen |
+
+**Jitter Statistics:**
+
+| Metric | Value |
+|--------|-------|
+| Standard deviation | **25.6ms** |
+| Within ±20ms | 55% |
+| **Within ±40ms** | **85%** |
+| Maximum late | +276ms |
+
+**Design Rule:** A 30-40ms staleness threshold is appropriate. ~85% of frames arrive within this window. Frames older than 40ms are safe to drop (except IDR).
+
+### Frame Size Statistics
+
+| Frame Type | Average | Range |
+|------------|---------|-------|
+| All frames | 24 KB | 0.4 - 138 KB |
+| **IDR frames** | **49 KB** | 29 - 138 KB |
+| **P-frames** | **23 KB** | 0.4 - 134 KB |
+
+### Buffer Sizing Recommendations
+
+```
+192KB jitter buffer calculation:
+  - Holds 4-8 typical frames (24KB average)
+  - Provides ~200ms jitter absorption at 30fps
+  - Can hold 1-2 maximum-size IDR frames
+
+Rule: Deep buffering (seconds) is counterproductive for projection video.
+      Drop frames rather than buffer for "smooth playback."
+```
+
+### GOP Structure
+
+| Metric | Value |
+|--------|-------|
+| P-frames per GOP (min) | 0 (back-to-back IDRs during recovery) |
+| P-frames per GOP (max) | 116 (sustained high FPS) |
+| P-frames per GOP (avg) | 54 |
+
+**No B-frames observed.** Stream is strictly I-P-P-P... with no bidirectional prediction. No frame reordering needed.
+
+### Stream Structure Pattern
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ CARPLAY VIDEO STREAM STRUCTURE                                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  [SPS+PPS+IDR] → [P] → [P] → ... → [P] → [SPS+PPS+IDR] → [P] → [P] → ...   │
+│       │              16-53 frames            │                               │
+│       │              (~550ms-2s)             │                               │
+│   Session                               Periodic                             │
+│    Start                               keyframe                              │
+│   (100%)                              (~2s typical)                          │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Design Rules (Derived from Data)
+
+| Rule | Justification |
+|------|---------------|
+| First packet is always SPS+PPS+IDR | 10/10 sessions verified |
+| Never discard IDR packets | Only recovery points; always bundled with SPS+PPS |
+| Use 30-40ms staleness threshold | 85% of frames within ±40ms |
+| 192KB buffer is sufficient | 4-8 frames, ~200ms at 30fps |
+| Don't expect constant frame rate | 2-60+ fps is normal based on UI activity |
+| No B-frames, no reordering needed | Strictly I-P-P stream |
+
+---
+
 ## References
 
 - Source: `carlink_native/documents/reference/Firmware/firmware_video.md`
+- **Quantitative analysis:** `carlink_native/documents/video_code_reasoning/17_USB_CAPTURE_STREAM_ANALYSIS.md`
 - Source: `pi-carplay-4.1.3/firmware_binaries/2025.02/NAVIGATION_PROTOCOL_ANALYSIS.md`
 - **508 handshake verified:** `pi-carplay-main/src/main/carplay/services/CarplayService.ts` (Jan 2026)
 - Binary analysis: `ARMadb-driver_unpacked`, `AppleCarPlay_unpacked` (Jan 2026)

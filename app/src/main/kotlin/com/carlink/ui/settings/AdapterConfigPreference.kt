@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.carlink.logging.logError
@@ -102,6 +103,72 @@ enum class CallQualityConfig(
 }
 
 /**
+ * Video resolution configuration for adapter initialization.
+ *
+ * AUTO uses the detected display resolution (usable area after system UI).
+ * Other options are calculated based on the display's aspect ratio to maintain
+ * proper proportions while reducing GPU load.
+ *
+ * Note: Resolution is stored as a string format "WIDTHxHEIGHT" or "AUTO".
+ */
+data class VideoResolutionConfig(
+    val width: Int,
+    val height: Int,
+) {
+    val isAuto: Boolean get() = width == 0 && height == 0
+
+    fun toStorageString(): String = if (isAuto) "AUTO" else "${width}x$height"
+
+    companion object {
+        val AUTO = VideoResolutionConfig(0, 0)
+
+        fun fromStorageString(value: String?): VideoResolutionConfig {
+            if (value == null || value == "AUTO") return AUTO
+            val parts = value.split("x")
+            return if (parts.size == 2) {
+                try {
+                    VideoResolutionConfig(parts[0].toInt(), parts[1].toInt())
+                } catch (e: NumberFormatException) {
+                    AUTO
+                }
+            } else {
+                AUTO
+            }
+        }
+
+        /**
+         * Calculate resolution options based on display aspect ratio.
+         *
+         * Returns 4 resolution options that maintain the display's aspect ratio,
+         * scaled down from the base resolution. All dimensions are rounded to
+         * even numbers for H.264 compatibility.
+         *
+         * @param displayWidth Native display width in pixels
+         * @param displayHeight Native display height in pixels
+         * @return List of 4 resolution options, largest to smallest
+         */
+        fun calculateOptions(displayWidth: Int, displayHeight: Int): List<VideoResolutionConfig> {
+            // Calculate GCD to find the aspect ratio
+            fun gcd(a: Int, b: Int): Int = if (b == 0) a else gcd(b, a % b)
+            val g = gcd(displayWidth, displayHeight)
+            val ratioW = displayWidth / g
+            val ratioH = displayHeight / g
+
+            // Calculate scale factors to generate 4 options
+            // Start from ~93.75% of original, then 83.3%, 72.9%, 62.5%
+            val scaleFactors = listOf(0.9375, 0.833, 0.729, 0.625)
+
+            return scaleFactors.map { scale ->
+                // Scale from display dimensions and round to even
+                val w = ((displayWidth * scale).toInt() and 1.inv())
+                val h = ((displayHeight * scale).toInt() and 1.inv())
+                VideoResolutionConfig(w, h)
+            }
+        }
+    }
+}
+
+/**
  * Adapter config preferences with DataStore + SharedPreferences sync cache for ANR-free startup reads.
  * Tracks pending changes for minimal re-initialization on reconnect.
  */
@@ -134,6 +201,9 @@ class AdapterConfigPreference private constructor(
         // Call quality: stored as value (0=normal, 1=clear, 2=HD)
         private val KEY_CALL_QUALITY = intPreferencesKey("call_quality")
 
+        // Video resolution: stored as string "WIDTHxHEIGHT" or "AUTO"
+        private val KEY_VIDEO_RESOLUTION = stringPreferencesKey("video_resolution")
+
         // Initialization tracking
         private val KEY_HAS_COMPLETED_FIRST_INIT = booleanPreferencesKey("has_completed_first_init")
         private val KEY_PENDING_CHANGES = stringSetPreferencesKey("pending_changes")
@@ -145,6 +215,7 @@ class AdapterConfigPreference private constructor(
         private const val SYNC_CACHE_KEY_MIC_SOURCE = "mic_source"
         private const val SYNC_CACHE_KEY_WIFI_BAND = "wifi_band"
         private const val SYNC_CACHE_KEY_CALL_QUALITY = "call_quality"
+        private const val SYNC_CACHE_KEY_VIDEO_RESOLUTION = "video_resolution"
         private const val SYNC_CACHE_KEY_HAS_COMPLETED_FIRST_INIT = "has_completed_first_init"
         private const val SYNC_CACHE_KEY_PENDING_CHANGES = "pending_changes"
 
@@ -157,6 +228,7 @@ class AdapterConfigPreference private constructor(
             const val MIC_SOURCE = "mic_source"
             const val WIFI_BAND = "wifi_band"
             const val CALL_QUALITY = "call_quality"
+            const val VIDEO_RESOLUTION = "video_resolution"
         }
     }
 
@@ -315,6 +387,39 @@ class AdapterConfigPreference private constructor(
         }
     }
 
+    val videoResolutionFlow: Flow<VideoResolutionConfig> =
+        dataStore.data.map { preferences ->
+            val value = preferences[KEY_VIDEO_RESOLUTION]
+            VideoResolutionConfig.fromStorageString(value)
+        }
+
+    /**
+     * Get current video resolution configuration synchronously.
+     * Returns AUTO if not configured.
+     */
+    fun getVideoResolutionSync(): VideoResolutionConfig {
+        val value = syncCache.getString(SYNC_CACHE_KEY_VIDEO_RESOLUTION, "AUTO")
+        return VideoResolutionConfig.fromStorageString(value)
+    }
+
+    /**
+     * Set video resolution configuration.
+     */
+    suspend fun setVideoResolution(config: VideoResolutionConfig) {
+        try {
+            val storageValue = config.toStorageString()
+            dataStore.edit { preferences ->
+                preferences[KEY_VIDEO_RESOLUTION] = storageValue
+            }
+            syncCache.edit().putString(SYNC_CACHE_KEY_VIDEO_RESOLUTION, storageValue).apply()
+            addPendingChange(ConfigKey.VIDEO_RESOLUTION)
+            logInfo("Video resolution preference saved: $storageValue", tag = "AdapterConfig")
+        } catch (e: Exception) {
+            logError("Failed to save video resolution preference: $e", tag = "AdapterConfig")
+            throw e
+        }
+    }
+
     data class UserConfig(
         /** Audio transfer mode: true = bluetooth, false = adapter (default) */
         val audioTransferMode: Boolean,
@@ -324,6 +429,8 @@ class AdapterConfigPreference private constructor(
         val wifiBand: WiFiBandConfig,
         /** Call quality configuration */
         val callQuality: CallQualityConfig,
+        /** Video resolution configuration */
+        val videoResolution: VideoResolutionConfig,
     ) {
         companion object {
             val DEFAULT =
@@ -332,6 +439,7 @@ class AdapterConfigPreference private constructor(
                     micSource = MicSourceConfig.DEFAULT,
                     wifiBand = WiFiBandConfig.DEFAULT,
                     callQuality = CallQualityConfig.DEFAULT,
+                    videoResolution = VideoResolutionConfig.AUTO,
                 )
         }
     }
@@ -347,11 +455,13 @@ class AdapterConfigPreference private constructor(
         val micSource = getMicSourceSync()
         val wifiBand = getWifiBandSync()
         val callQuality = getCallQualitySync()
+        val videoResolution = getVideoResolutionSync()
         return UserConfig(
             audioTransferMode = audioSource == AudioSourceConfig.BLUETOOTH,
             micSource = micSource,
             wifiBand = wifiBand,
             callQuality = callQuality,
+            videoResolution = videoResolution,
         )
     }
 
@@ -367,6 +477,7 @@ class AdapterConfigPreference private constructor(
             micSource = getMicSourceSync(),
             wifiBand = getWifiBandSync(),
             callQuality = getCallQualitySync(),
+            videoResolution = getVideoResolutionSync(),
         )
     }
 
@@ -383,6 +494,7 @@ class AdapterConfigPreference private constructor(
                 preferences.remove(KEY_MIC_SOURCE)
                 preferences.remove(KEY_WIFI_BAND)
                 preferences.remove(KEY_CALL_QUALITY)
+                preferences.remove(KEY_VIDEO_RESOLUTION)
                 preferences.remove(KEY_HAS_COMPLETED_FIRST_INIT)
                 preferences.remove(KEY_PENDING_CHANGES)
             }
@@ -395,6 +507,7 @@ class AdapterConfigPreference private constructor(
                     remove(SYNC_CACHE_KEY_MIC_SOURCE)
                     remove(SYNC_CACHE_KEY_WIFI_BAND)
                     remove(SYNC_CACHE_KEY_CALL_QUALITY)
+                    remove(SYNC_CACHE_KEY_VIDEO_RESOLUTION)
                     remove(SYNC_CACHE_KEY_HAS_COMPLETED_FIRST_INIT)
                     remove(SYNC_CACHE_KEY_PENDING_CHANGES)
                 }.apply()
@@ -410,12 +523,14 @@ class AdapterConfigPreference private constructor(
      */
     suspend fun getPreferencesSummary(): Map<String, Any?> {
         val audioSource = getAudioSource()
+        val videoRes = getVideoResolutionSync()
         return mapOf(
             "audioSource" to audioSource.name,
             "audioTransferMode" to if (audioSource == AudioSourceConfig.BLUETOOTH) "true (bluetooth)" else "false (adapter)",
             "micSource" to getMicSourceSync().name,
             "wifiBand" to getWifiBandSync().name,
             "callQuality" to getCallQualitySync().name,
+            "videoResolution" to videoRes.toStorageString(),
             "hasCompletedFirstInit" to hasCompletedFirstInitSync(),
             "pendingChanges" to getPendingChangesSync(),
         )

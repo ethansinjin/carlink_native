@@ -63,34 +63,6 @@ object MessageSerializer {
     // ==================== Touch Messages ====================
 
     /**
-     * Serialize a single touch event.
-     *
-     * @param action Touch action type
-     * @param x Normalized X coordinate (0.0 to 1.0)
-     * @param y Normalized Y coordinate (0.0 to 1.0)
-     */
-    fun serializeTouch(
-        action: TouchAction,
-        x: Float,
-        y: Float,
-    ): ByteArray {
-        val finalX = (10000 * x).toInt().coerceIn(0, 10000)
-        val finalY = (10000 * y).toInt().coerceIn(0, 10000)
-
-        val payload =
-            ByteBuffer
-                .allocate(16)
-                .order(ByteOrder.LITTLE_ENDIAN)
-                .putInt(action.id)
-                .putInt(finalX)
-                .putInt(finalY)
-                .putInt(0) // flags
-                .array()
-
-        return serializeWithPayload(MessageType.TOUCH, payload)
-    }
-
-    /**
      * Touch point data for multi-touch events.
      */
     data class TouchPoint(
@@ -254,7 +226,7 @@ object MessageSerializer {
                 put("syncTime", actualSyncTime)
                 put("androidAutoSizeW", aaWidth)
                 put("androidAutoSizeH", aaHeight)
-                put("mediaSound", if (config.sampleRate == 44100) 0 else 1) // 0=44.1kHz, 1=48kHz
+                put("mediaSound", 1) // 48kHz only
                 put("callQuality", config.callQuality) // 0=normal, 1=clear, 2=HD
                 put("WiFiChannel", 161) // 5GHz channel 161 (optimal low interference)
                 put("wifiChannel", 161) // Both keys for compatibility
@@ -444,105 +416,5 @@ object MessageSerializer {
         if (config.androidWorkMode) {
             messages.add(serializeBoolean(true, FileAddress.ANDROID_WORK_MODE))
         }
-    }
-
-    /**
-     * Generate the initialization message sequence.
-     *
-     * @param config Adapter configuration
-     * @param useMinimalConfig When true, only sends essential messages (DPI, Open, WiFi Enable).
-     *                         Use for subsequent sessions where adapter already has persisted config.
-     *                         When false, sends full configuration including files and settings.
-     * @deprecated Use generateInitSequence(config, initMode, pendingChanges) instead
-     */
-    fun generateInitSequence(
-        config: AdapterConfig,
-        useMinimalConfig: Boolean = false,
-    ): List<ByteArray> {
-        val messages = mutableListOf<ByteArray>()
-
-        // === MINIMAL CONFIG: Only essential messages ===
-        // These are required every session:
-        // - DPI: stored in /tmp/ which is cleared on adapter power cycle
-        // - Open: display dimensions may change between sessions
-        // - WiFi Enable: required to activate wireless mode (sent last)
-
-        // DPI configuration (always needed - /tmp/ is volatile)
-        messages.add(serializeNumber(config.dpi, FileAddress.DPI))
-
-        // Open command with resolution/format (always needed)
-        messages.add(serializeOpen(config))
-
-        if (useMinimalConfig) {
-            // Minimal config: adapter retains all other settings from /etc/riddle.conf
-            // Android work mode must be re-sent on each reconnect to restart AA daemon
-            if (config.androidWorkMode) {
-                messages.add(serializeBoolean(true, FileAddress.ANDROID_WORK_MODE))
-            }
-            // WiFi Enable sent last to activate wireless mode after config
-            messages.add(serializeCommand(CommandMapping.WIFI_ENABLE))
-            return messages
-        }
-
-        // === FULL CONFIG: All settings (first install or reset) ===
-
-        // Box name
-        messages.add(serializeString(config.boxName, FileAddress.BOX_NAME))
-
-        // AirPlay configuration
-        messages.add(serializeString(generateAirplayConfig(config), FileAddress.AIRPLAY_CONFIG))
-
-        // Upload icons if provided
-        config.icon120Data?.let { iconData ->
-            messages.add(serializeFile(FileAddress.ICON_120.path, iconData))
-        }
-        config.icon180Data?.let { iconData ->
-            messages.add(serializeFile(FileAddress.ICON_180.path, iconData))
-        }
-        config.icon256Data?.let { iconData ->
-            messages.add(serializeFile(FileAddress.ICON_256.path, iconData))
-        }
-
-        // WiFi band selection
-        val wifiCommand =
-            if (config.wifiType == "5ghz") {
-                CommandMapping.WIFI_5G
-            } else {
-                CommandMapping.WIFI_24G
-            }
-        messages.add(serializeCommand(wifiCommand))
-
-        // Box settings JSON
-        messages.add(serializeBoxSettings(config))
-
-        // Microphone source
-        val micCommand =
-            if (config.micType == "box") {
-                CommandMapping.BOX_MIC
-            } else {
-                CommandMapping.MIC
-            }
-        messages.add(serializeCommand(micCommand))
-
-        // Audio transfer mode
-        // true = bluetooth (AUDIO_TRANSFER_ON)
-        // false = adapter/USB (AUDIO_TRANSFER_OFF) - default
-        val fullInitAudioCommand =
-            if (config.audioTransferMode) {
-                CommandMapping.AUDIO_TRANSFER_ON
-            } else {
-                CommandMapping.AUDIO_TRANSFER_OFF
-            }
-        messages.add(serializeCommand(fullInitAudioCommand))
-
-        // Android work mode (if enabled)
-        if (config.androidWorkMode) {
-            messages.add(serializeBoolean(true, FileAddress.ANDROID_WORK_MODE))
-        }
-
-        // WiFi Enable sent last to activate wireless mode after config
-        messages.add(serializeCommand(CommandMapping.WIFI_ENABLE))
-
-        return messages
     }
 }

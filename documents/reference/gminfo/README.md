@@ -14,6 +14,7 @@
 | Document | Description |
 |----------|-------------|
 | **[projection_comparison.md](projection_comparison.md)** | **CarPlay vs Android Auto comparison (video, audio, protocol)** |
+| **[cluster_navigation_pipeline.md](cluster_navigation_pipeline.md)** | **Navigation-to-cluster data flow (CarPlay, AA, Google Maps to instrument cluster)** |
 | **[third_party_access.md](third_party_access.md)** | **Third-party app access to Intel Video/Audio APIs** |
 | [hardware_rendering.md](hardware_rendering.md) | GPU, OpenGL, Vulkan specifications |
 

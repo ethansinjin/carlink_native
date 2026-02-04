@@ -22,7 +22,7 @@ package com.carlink.audio
  * - Navigation stream: 100-150ms recommended (lower latency for prompts)
  *
  * @param capacityMs Buffer capacity in milliseconds
- * @param sampleRate Audio sample rate (e.g., 44100, 48000)
+ * @param sampleRate Audio sample rate (e.g., 48000)
  * @param channels Number of audio channels (1=mono, 2=stereo)
  */
 class AudioRingBuffer(
@@ -165,12 +165,12 @@ class AudioRingBuffer(
 
     companion object {
         fun forMedia(
-            sampleRate: Int = 44100,
+            sampleRate: Int = 48000,
             channels: Int = 2,
         ) = AudioRingBuffer(capacityMs = 250, sampleRate = sampleRate, channels = channels)
 
         fun forNavigation(
-            sampleRate: Int = 44100,
+            sampleRate: Int = 48000,
             channels: Int = 2,
         ) = AudioRingBuffer(capacityMs = 120, sampleRate = sampleRate, channels = channels)
     }

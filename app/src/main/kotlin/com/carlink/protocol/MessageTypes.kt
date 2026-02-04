@@ -54,51 +54,137 @@ const val SESSION_TOKEN_ENCRYPTION_KEY: String = "W2EC1X1NbZ58TXtn"
 
 /**
  * Command mappings for CPC200-CCPA protocol.
- * Used for sending control commands to the adapter.
+ *
+ * Commands are bidirectional - some are sent to adapter (H→A), some received from adapter (A→H),
+ * and some are forwarded to/from the connected phone (H→A→P or P→A→H).
+ *
+ * Reference: documents/reference/firmware/RE_Documention/02_Protocol_Reference/command_ids.md
  */
 enum class CommandMapping(
     val id: Int,
 ) {
     INVALID(0),
-    START_RECORD_AUDIO(1),
-    STOP_RECORD_AUDIO(2),
-    REQUEST_HOST_UI(3),
-    SIRI(5),
-    MIC(7),
-    BOX_MIC(15),
-    ENABLE_NIGHT_MODE(16),
-    DISABLE_NIGHT_MODE(17),
-    WIFI_24G(24),
-    WIFI_5G(25),
-    LEFT(100),
-    RIGHT(101),
-    FRAME(12),
-    AUDIO_TRANSFER_ON(22),
-    AUDIO_TRANSFER_OFF(23),
-    SELECT_DOWN(104),
-    SELECT_UP(105),
-    BACK(106),
-    DOWN(114),
-    HOME(200),
-    PLAY(201),
-    PAUSE(202),
-    NEXT(204),
-    PREV(205),
-    REQUEST_VIDEO_FOCUS(500),
-    RELEASE_VIDEO_FOCUS(501),
-    WIFI_ENABLE(1000),
-    AUTO_CONNECT_ENABLE(1001),
-    WIFI_CONNECT(1002),
-    SCANNING_DEVICE(1003),
-    DEVICE_FOUND(1004),
-    DEVICE_NOT_FOUND(1005),
-    CONNECT_DEVICE_FAILED(1006),
-    BT_CONNECTED(1007),
-    BT_DISCONNECTED(1008),
-    WIFI_CONNECTED(1009),
-    PROJECTION_DISCONNECTED(1010),
-    BT_PAIR_START(1011),
-    WIFI_PAIR(1012),
+
+    // === Basic Commands (1-31) ===
+
+    // Microphone Recording (H→A→P)
+    START_RECORD_AUDIO(1),  // StartRecordMic - Begin mic recording
+    STOP_RECORD_AUDIO(2),   // StopRecordMic - Stop mic recording
+
+    // UI Control (P→A→H)
+    REQUEST_HOST_UI(3),     // RequestHostUI - Phone requests host show native UI
+    HIDE(14),               // Hide - Phone requests hide/minimize projection
+
+    // Bluetooth Control (H→A, also extended format A→H for BT MAC notification)
+    DISABLE_BLUETOOTH(4),   // DisableBluetooth - Disable adapter Bluetooth
+
+    // Siri/Voice Assistant (H→A→P)
+    SIRI(5),                // SiriButtonDown - Siri button pressed (initiates Siri)
+    SIRI_BUTTON_UP(6),      // SiriButtonUp - Siri button released
+
+    // Microphone Source Selection (H→A)
+    MIC(7),                 // UseCarMic - Use car's microphone
+    USE_BOX_MIC(8),         // UseBoxMic - Use adapter's built-in microphone
+    BOX_MIC(15),            // UseBoxI2SMic - Use adapter's I2S microphone
+    USE_PHONE_MIC(21),      // UsePhoneMic - Use phone's microphone
+
+    // Video Control (H→A)
+    FRAME(12),              // RequestKeyFrame - Request video IDR frame
+    REFRESH_FRAME(26),      // RefreshFrame - Force video frame refresh
+
+    // Night Mode (H→A)
+    ENABLE_NIGHT_MODE(16),  // StartNightMode - Enable dark theme
+    DISABLE_NIGHT_MODE(17), // StopNightMode - Disable dark theme
+
+    // GPS/GNSS Forwarding (H→A)
+    START_GNSS_REPORT(18),  // StartGNSSReport - Start GPS data forwarding to phone
+    STOP_GNSS_REPORT(19),   // StopGNSSReport - Stop GPS data forwarding
+
+    // Audio Routing (H→A)
+    AUDIO_TRANSFER_ON(22),  // UseBluetoothAudio - Route audio via Bluetooth
+    AUDIO_TRANSFER_OFF(23), // UseBoxTransAudio - Route audio via adapter transmitter
+
+    // WiFi Band Selection (H→A)
+    WIFI_24G(24),           // Use24GWiFi - Switch to 2.4 GHz WiFi band
+    WIFI_5G(25),            // Use5GWiFi - Switch to 5 GHz WiFi band
+
+    // Standby Mode (H→A)
+    START_STANDBY_MODE(28), // StartStandbyMode - Enter low-power standby
+    STOP_STANDBY_MODE(29),  // StopStandbyMode - Exit standby mode
+
+    // BLE Advertising (H→A)
+    START_BLE_ADV(30),      // StartBleAdv - Start BLE advertising for wireless pairing
+    STOP_BLE_ADV(31),       // StopBleAdv - Stop BLE advertising
+
+    // === D-Pad Control Commands (100-106) - All H→A→P ===
+    LEFT(100),              // CtrlButtonLeft - D-Pad left
+    RIGHT(101),             // CtrlButtonRight - D-Pad right
+    UP(102),                // CtrlButtonUp - D-Pad up
+    DOWN_BUTTON(103),       // CtrlButtonDown - D-Pad down
+    SELECT_DOWN(104),       // CtrlButtonEnter - Enter/Select pressed
+    SELECT_UP(105),         // CtrlButtonRelease - Button release
+    BACK(106),              // CtrlButtonBack - Back button
+
+    // === Rotary Knob Commands (111-114) - All H→A→P ===
+    KNOB_LEFT(111),         // CtrlKnobLeft - Knob counter-clockwise
+    KNOB_RIGHT(112),        // CtrlKnobRight - Knob clockwise
+    KNOB_UP(113),           // CtrlKnobUp - Knob tilt up
+    DOWN(114),              // CtrlKnobDown - Knob tilt down (legacy name kept for compatibility)
+
+    // === Media Control Commands (200-205) - All H→A→P ===
+    HOME(200),              // MusicACHome - Home button
+    PLAY(201),              // MusicPlay - Play
+    PAUSE(202),             // MusicPause - Pause
+    PLAY_PAUSE(203),        // MusicPlayOrPause - Toggle play/pause
+    NEXT(204),              // MusicNext - Next track
+    PREV(205),              // MusicPrev - Previous track
+
+    // === Phone Call Commands (300-314) - All H→A→P ===
+    PHONE_ANSWER(300),      // PhoneAnswer - Answer incoming call
+    PHONE_HANG_UP(301),     // PhoneHungUp - End/reject call
+    PHONE_KEY_0(302),       // PhoneKey0 - DTMF tone 0
+    PHONE_KEY_1(303),       // PhoneKey1 - DTMF tone 1
+    PHONE_KEY_2(304),       // PhoneKey2 - DTMF tone 2
+    PHONE_KEY_3(305),       // PhoneKey3 - DTMF tone 3
+    PHONE_KEY_4(306),       // PhoneKey4 - DTMF tone 4
+    PHONE_KEY_5(307),       // PhoneKey5 - DTMF tone 5
+    PHONE_KEY_6(308),       // PhoneKey6 - DTMF tone 6
+    PHONE_KEY_7(309),       // PhoneKey7 - DTMF tone 7
+    PHONE_KEY_8(310),       // PhoneKey8 - DTMF tone 8
+    PHONE_KEY_9(311),       // PhoneKey9 - DTMF tone 9
+    PHONE_KEY_STAR(312),    // PhoneKeyStar - DTMF tone *
+    PHONE_KEY_POUND(313),   // PhoneKeyPound - DTMF tone #
+    PHONE_HOOK_SWITCH(314), // CarPlay_PhoneHookSwitch - Hook switch toggle
+
+    // === Android Auto Focus Commands (500-507) ===
+    REQUEST_VIDEO_FOCUS(500),       // RequestVideoFocus (A→H) - Adapter requests host show video
+    RELEASE_VIDEO_FOCUS(501),       // ReleaseVideoFocus (A→H) - Adapter releases video focus
+    AA_UNKNOWN_502(502),            // Android Auto related (unverified)
+    AA_UNKNOWN_503(503),            // Android Auto related (unverified)
+    REQUEST_AUDIO_FOCUS_DUCK(504),  // RequestAudioFocusDuck (A→H) - Request audio ducking
+    RELEASE_AUDIO_FOCUS(505),       // ReleaseAudioFocus (A→H) - Release audio focus
+    REQUEST_NAVI_FOCUS(506),        // RequestNaviFocus (A→H) - Request navigation audio focus
+    RELEASE_NAVI_FOCUS(507),        // ReleaseNaviFocus (A→H) - Release navigation focus
+
+    // === Connection Status Commands (1000-1013) ===
+
+    // Host → Adapter
+    WIFI_ENABLE(1000),          // SupportWifi - Enable WiFi mode
+    AUTO_CONNECT_ENABLE(1001),  // SupportAutoConnect - Enable auto-connect
+    WIFI_CONNECT(1002),         // StartAutoConnect - Start auto-connect scan
+    WIFI_PAIR(1012),            // WiFiPair - Enter WiFi pairing mode
+    GET_BT_ONLINE_LIST(1013),   // GetBluetoothOnlineList - Request BT device list
+
+    // Adapter → Host (Status Notifications)
+    SCANNING_DEVICE(1003),      // ScaningDevices - Adapter scanning for devices
+    DEVICE_FOUND(1004),         // DeviceFound - Device found during scan
+    DEVICE_NOT_FOUND(1005),     // DeviceNotFound - No device found
+    CONNECT_DEVICE_FAILED(1006), // DeviceConnectFailed - Connection attempt failed
+    BT_CONNECTED(1007),         // DeviceBluetoothConnected - Bluetooth connected
+    BT_DISCONNECTED(1008),      // DeviceBluetoothNotConnected - Bluetooth disconnected
+    WIFI_CONNECTED(1009),       // DeviceWifiConnected - WiFi hotspot: phone connected
+    WIFI_DISCONNECTED(1010),    // DeviceWifiNotConnected - WiFi hotspot: no phone (NOT session end!)
+    BT_PAIR_START(1011),        // DeviceBluetoothPairStart - Bluetooth pairing started
     ;
 
     companion object {
@@ -295,25 +381,6 @@ enum class MediaType(
 }
 
 /**
- * Touch action types for single-touch input.
- */
-enum class TouchAction(
-    val id: Int,
-) {
-    DOWN(14),
-    MOVE(15),
-    UP(16),
-    UNKNOWN(-1),
-    ;
-
-    companion object {
-        private val idMap = entries.associateBy { it.id }
-
-        fun fromId(id: Int): TouchAction = idMap[id] ?: UNKNOWN
-    }
-}
-
-/**
  * Multi-touch action types.
  */
 enum class MultiTouchAction(
@@ -330,45 +397,6 @@ enum class MultiTouchAction(
 
         fun fromId(id: Int): MultiTouchAction = idMap[id] ?: UNKNOWN
     }
-}
-
-/**
- * Audio format configuration based on decode type.
- */
-data class AudioFormat(
-    val frequency: Int,
-    val channels: Int,
-    val bitrate: Int,
-)
-
-/**
- * Decode type to audio format mapping.
- *
- * decode_type serves dual purposes:
- * 1. Audio format specification (sample rate, channels, bit depth)
- * 2. Semantic context for the audio command (discovered Dec 2025 capture research)
- *
- * Semantic meanings (from CPC200 adapter capture analysis):
- * - decode_type=2: Stop/cleanup operations (seen with MEDIA_STOP, PHONECALL_STOP)
- * - decode_type=4: Standard CarPlay audio output (MEDIA_START, NAVI_*, ALERT_*, OUTPUT_*)
- * - decode_type=5: Mic/input related operations (SIRI_*, PHONECALL_START, INPUT_*, INCOMING_CALL_INIT)
- *
- * Note: decode_type appears in the 13-byte audio command packet:
- *   [decode_type:4][volume:4][audio_type:4][command:1]
- */
-object AudioFormats {
-    private val formats =
-        mapOf(
-            1 to AudioFormat(44100, 2, 16), // Media playback (44.1kHz)
-            2 to AudioFormat(44100, 2, 16), // Navigation / Stop commands
-            3 to AudioFormat(8000, 1, 16), // Phone call (narrow-band)
-            4 to AudioFormat(48000, 2, 16), // Media HD / Standard CarPlay
-            5 to AudioFormat(16000, 1, 16), // Siri / Phone / Mic input
-            6 to AudioFormat(24000, 1, 16), // Voice recognition
-            7 to AudioFormat(16000, 2, 16), // Stereo voice
-        )
-
-    fun fromDecodeType(decodeType: Int): AudioFormat? = formats[decodeType]
 }
 
 /**
@@ -413,7 +441,7 @@ data class AdapterConfig(
     val mediaDelay: Int = 300,
     /** Audio transfer mode: true=bluetooth, false=adapter (USB audio, default) */
     val audioTransferMode: Boolean = false,
-    /** Sample rate for media audio: 44100 or 48000 Hz. Controls mediaSound in BoxSettings. */
+    /** Sample rate for media audio (48000 Hz). Controls mediaSound in BoxSettings. */
     val sampleRate: Int = 48000,
     val wifiType: String = "5ghz",
     val micType: String = "os",

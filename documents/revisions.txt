@@ -70,3 +70,57 @@
 [52] :: Some more Video tweaks. If Intel platform will attempt FULL flush, destroy, recreate of codec. Video issues might be faulty General Motor + Intel Software Design on gminfo3.7 - 3.8 hardware.
 [53] :: Hid logs and session capture tabs behind a toggle. Removed Audio Sample Rate Option
 [54] :: GM AAOS (gminfo3.7) optimization testing. Use Video PTS instead of synthetic timing, lower buffer sizes. Airplay.conf changes (dam icon label). Audio Thread priority change
+[55] :: Audio Types based on recvd protocol command grouping for GM AAOS independent volume control via their own track. Video Code changes
+[56] :: MAJOR RESTRUCTURE: Projection Video Model. "Buffer for stability, not completeness." CarPlay/Android Auto is live interactive UI, not cinema playback.
+       BUFFER: Reduced from 2-4MB to 192KB jitter buffer. Packet limit 120→12 (~200ms).
+       STALENESS: Frames >150ms old discarded at entry. Skip-to-newest-IDR on overflow.
+       PTS: Monotonic synthetic only. Source PTS queue removed.
+       QC: Quality Control system removed entirely (was counterproductive).
+       DECODER DISCIPLINE: IDR gate (don't decode P-frames until first IDR). Stall timeout (reset+keyframe request if no output for 500ms).
+       PacketRingByteBuffer: Added peekNalType(), skipToNewestIdr() methods.
+       USB CAPTURE ANALYSIS: Confirmed adapter sends SPS+PPS+IDR at start, periodic IDRs (~1.4s) on request.
+[57] :: CRITICAL FIX: Decoder Poisoning / Staleness Time Base Bug
+       ROOT CAUSE: Staleness check compared System.currentTimeMillis() (epoch ~1.7T ms) to
+       sourcePtsMs (stream-relative ~32K ms) - incompatible time bases producing meaningless results.
+       All frames appeared "stale" and only passed when buffer was empty (race condition).
+       This caused IDR frames to be discarded, preventing decoder recovery.
+
+       FIX 1: DISABLED staleness check entirely - it was harmful, not just incomplete.
+              Recovery now relies on: IDR gating, stall detection, buffer overflow handling.
+       FIX 2: Reduced STALL_TIMEOUT_MS from 500ms to 200ms for faster recovery.
+              "One reset is cheaper than ten corrupted frames."
+       FIX 3: Added corruption detection via IDR tracking.
+              Tracks IDRs decoded vs frames output. If multiple IDRs decoded but low output,
+              decoder is "poisoned" - triggers reset. Implements concepts.txt principle:
+              "If corruption survives one IDR, your decoder state is poisoned. Reset immediately."
+
+       USB CAPTURE ANALYSIS: Verified adapter sends correct data (88 IDRs over 169s, all bundled
+       with SPS+PPS, ~1.4s interval). Problem was app-side, not adapter-side.
+       ADAPTER LOG ANALYSIS: Confirmed PTS is stream-relative (media time), not epoch time.
+       Average frame delay from adapter: 7.85ms (well within spec).
+[58] :: H264Renderer.java stall detection fix:
+       - Was: lastOutputTimeMs = 0 after reset (disabled stall detection)
+       - Now: lastOutputTimeMs = System.currentTimeMillis() (enables stall detection after reset)
+
+       Added telemetry per Document 18 guidance:
+       - Decode latency tracking (avg/max) in PERF logs
+       - IDR interval tracking (avg/last) with >3s warning
+       - Queue depth tracking (avg/max) with >5 warning
+       - IDR gate drop count
+       - Audio underrun count (public method for audio manager)
+
+[59] :: H264Renderer.java telemetry fixes:
+       BUG 1: Queue depth tracking was in deprecated processDataDirect() method.
+              Production uses processDataDirectWithPts() which had no tracking.
+       FIX 1: Added queue depth tracking to processDataDirectWithPts().
+
+       BUG 2: IDR interval tracking was inside queueIdrWithSpsPps() success block.
+              But adapter sends SPS+PPS with every IDR, so queueIdrWithSpsPps() returns
+              false (line 2109: "Packet already has SPS - queue as-is without prepending").
+              Result: IDR interval telemetry never recorded for live adapter streaming.
+       FIX 2: Moved IDR tracking outside queueIdrWithSpsPps() success block.
+              Now tracks ALL IDR frames regardless of whether SPS/PPS injection happens.
+              Applied to both tryQueueToCodec() and feedCodecFromBuffer() code paths.
+[60] :: Select different resolution
+
+[61] :: Video Code refactoring. Basically revert back to abuharsky app simplicity. Code cleanup elsewhere. Documentation updates
