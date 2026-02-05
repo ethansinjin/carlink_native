@@ -63,6 +63,12 @@ public class H264Renderer {
     private volatile long lastInputCallbackTime = 0;
     private volatile long lastOutputCallbackTime = 0;
 
+    // Silent failure tracking - helps diagnose zombie codec state
+    private final AtomicLong nullBufferCount = new AtomicLong(0);
+    private final AtomicLong zeroReadCount = new AtomicLong(0);
+    private final AtomicLong feedExceptionCount = new AtomicLong(0);
+    private volatile String lastFeedException = null;
+
     // TODO [SELF_HEALING]: Auto-reset for frozen video pipeline.
     //
     // PROBLEM: Codec stuck. Frames arriving, nothing rendering. Frozen = corruption.
@@ -282,12 +288,11 @@ public class H264Renderer {
             // Ignore
         }
 
-        // Intel-specific optimizations
+        // Intel-specific: set max input size to disable Adaptive Playback (reduces latency)
         if (codecName != null && codecName.contains("Intel")) {
             try {
                 mediaformat.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, width * height);
-                mediaformat.setInteger("max-concurrent-instances", 1);
-                log("Intel optimizations applied");
+                log("Intel optimization applied: KEY_MAX_INPUT_SIZE");
             } catch (Exception e) {
                 // Ignore
             }
@@ -320,12 +325,24 @@ public class H264Renderer {
         try {
             ByteBuffer byteBuffer = mCodec.getInputBuffer(index);
             if (byteBuffer == null) {
+                // Track null buffer - indicates codec in zombie state
+                long count = nullBufferCount.incrementAndGet();
+                if (count == 1 || count % 100 == 0) {
+                    debugLog("getInputBuffer returned null (count=" + count + ", index=" + index + ")");
+                }
                 codecAvailableBufferIndexes.offer(index);
                 return false;
             }
 
             int bytesWritten = ringBuffer.readPacketInto(byteBuffer);
             if (bytesWritten == 0) {
+                // Track zero read - buffer issue or capacity mismatch
+                long count = zeroReadCount.incrementAndGet();
+                if (count == 1 || count % 100 == 0) {
+                    debugLog("readPacketInto returned 0 (count=" + count +
+                            ", bufRemaining=" + byteBuffer.remaining() +
+                            ", ringPackets=" + ringBuffer.availablePacketsToRead() + ")");
+                }
                 codecAvailableBufferIndexes.offer(index);
                 return false;
             }
@@ -335,6 +352,12 @@ public class H264Renderer {
             feedSuccesses.incrementAndGet();
             return true;
         } catch (Exception e) {
+            // Track exceptions - often IllegalStateException when codec is in bad state
+            long count = feedExceptionCount.incrementAndGet();
+            lastFeedException = e.getClass().getSimpleName() + ": " + e.getMessage();
+            if (count == 1 || count % 100 == 0) {
+                debugLog("queueInputBuffer exception (count=" + count + "): " + lastFeedException);
+            }
             codecAvailableBufferIndexes.offer(index);
             return false;
         }
@@ -425,10 +448,30 @@ public class H264Renderer {
             long lastOutAge = lastOutputCallbackTime > 0 ? currentTime - lastOutputCallbackTime : -1;
             boolean surfaceValid = surface != null && surface.isValid();
 
-            debugLog("Rx:" + rx + " Dec:" + dec + " Buf:" + bufCount + " InAvail:" + inAvail +
-                    " Feed:" + attempts + "/" + successes +
-                    " LastIn:" + lastInAge + "ms LastOut:" + lastOutAge + "ms" +
-                    " run=" + running + " codec=" + (mCodec != null) + " surface=" + surfaceValid);
+            // Silent failure counters (reset each interval)
+            long nullBufs = nullBufferCount.getAndSet(0);
+            long zeroReads = zeroReadCount.getAndSet(0);
+            long exceptions = feedExceptionCount.getAndSet(0);
+
+            StringBuilder sb = new StringBuilder();
+            sb.append("Rx:").append(rx).append(" Dec:").append(dec)
+              .append(" Buf:").append(bufCount).append(" InAvail:").append(inAvail)
+              .append(" Feed:").append(attempts).append("/").append(successes)
+              .append(" LastIn:").append(lastInAge).append("ms LastOut:").append(lastOutAge).append("ms")
+              .append(" run=").append(running).append(" codec=").append(mCodec != null)
+              .append(" surface=").append(surfaceValid);
+
+            // Only append failure info if there were failures (keeps log clean when healthy)
+            if (nullBufs > 0 || zeroReads > 0 || exceptions > 0) {
+                sb.append(" FAIL[null:").append(nullBufs)
+                  .append(" zero:").append(zeroReads)
+                  .append(" exc:").append(exceptions).append("]");
+                if (lastFeedException != null && exceptions > 0) {
+                    sb.append(" lastExc=").append(lastFeedException);
+                }
+            }
+
+            debugLog(sb.toString());
 
             lastPerfLogTime = currentTime;
         }

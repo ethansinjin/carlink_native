@@ -47,24 +47,54 @@ Audio:
 ### Video Freeze (Audio Continues)
 **Symptom**: Live UI freezes while audio continues playing. Does not self-recover. User must manually use "Reset Video Decoder" button or navigate away from app.
 
-**Root Cause**: MediaCodec can enter a bad state without triggering `onError()` callback. No automatic recovery mechanism exists.
+**Root Cause Analysis (Feb 2026)**:
 
-**Workaround**: Manual reset via Settings → Reset Video Decoder, or navigate to home screen and back.
+MediaCodec enters a "zombie state" - alive by all observable metrics, but internally dead:
+- `mCodec != null` ✓
+- `running == true` ✓
+- `surface.isValid() == true` ✓
+- BUT `onInputBufferAvailable` callbacks stop
+- AND `getInputBuffer(index)` returns null
+- AND `onError` callback never triggers
 
-**Planned Improvements** (see `H264Renderer.java` TODOs):
+**Evidence from logcat analysis**:
+```
+H264_PIPELINE: Rx:1330 Dec:0 InAvail:4 Feed:1330/0 LastIn:65502ms run=true codec=true surface=true
+```
+- 1330 frames received, 0 decoded
+- Feed attempts succeed (index obtained) but `getInputBuffer()` returns null
+- Same buffer indexes recycle indefinitely: poll → null → offer → poll → null...
+- Codec stuck for 65+ seconds without triggering error callback
 
-1. **`[SELF_HEALING]`** - Priority: HIGH
-   - Frozen = corruption. Corruption = reset. Don't try to recover, just reset.
-   - Detect: frames arriving + nothing rendering = stuck. Action: `reset()`.
+**Diagnostic logging added** (temporary, to confirm root cause):
+- `H264Renderer.java` now tracks silent failures: `nullBufferCount`, `zeroReadCount`, `feedExceptionCount`
+- Periodic stats show `FAIL[null:X zero:Y exc:Z]` when failures occur
+- Throttled per-failure logging (1st occurrence + every 100th)
 
-2. **`[LIVE_UI_OPTIMIZATION]`** - Priority: MEDIUM
-   - Buffers are lies. 10 frames = 166ms of stale state.
-   - Target: 1-2 frames (thread handoff only). Drops are correct behavior.
+**Workaround**: Manual reset via Settings → Reset Video Decoder, or navigate to home screen and back. Home button works because it triggers Activity lifecycle → `stop()` → `resume()` → full codec recreation.
 
-3. **`[DIRECT_HANDOFF]`** - Priority: LOW (after SELF_HEALING proven)
-   - Feed codec directly or drop. Late frames must be dropped, not queued.
+**The Only Bug**: Missing automatic reset when codec stuck. Frame drops elsewhere are **correct behavior** - late frames are invalid, dropping them is right.
 
-**For Future Debugging**: Frozen video = implement `[SELF_HEALING]`. Just reset.
+**Planned Fix** - see `H264Renderer.java:72-89` TODO `[SELF_HEALING]`:
+
+Once diagnostic logging confirms `getInputBuffer() == null` is the failure path:
+- Watchdog detects: `Rx > 0 && Dec == 0` for 5+ seconds
+- Action: `reset()` - full codec recreation (same as home button)
+- Codec recreated, keyframe requested, UI resumes
+
+**Philosophy**: This is live UI, not media playback. Do not add complexity. Do not preserve frames. Do not retry. Do not buffer "just in case." The fix is simple: detect stuck, reset. Broken = reset. That's it.
+
+**What Is NOT A Bug**:
+- Frames dropped due to late arrival → correct
+- Frames dropped when codec busy → correct
+- Partial USB reads discarded → correct
+- Ring buffer overflow drops → correct (buffer shouldn't exist anyway)
+
+**Future Work** (see `H264Renderer.java` TODOs):
+
+1. **`[LIVE_UI_OPTIMIZATION]`** `:95` - Reduce buffer from 10 frames to 1-2 (thread handoff only). Current 10 frames = 166ms of stale UI state. Drops will increase - that's correct.
+
+2. **`[DIRECT_HANDOFF]`** `:383` - Eliminate buffer entirely. Feed codec directly or drop. GM AAOS does this.
 
 ---
 
