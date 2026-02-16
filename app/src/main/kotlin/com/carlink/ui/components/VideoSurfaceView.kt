@@ -39,10 +39,6 @@ class VideoSurfaceView
         }
 
         var callback: Callback? = null
-        var surfaceWidth: Int = 0
-            private set
-        var surfaceHeight: Int = 0
-            private set
         var isSurfaceCreated: Boolean = false
             private set
 
@@ -67,8 +63,6 @@ class VideoSurfaceView
             width: Int,
             height: Int,
         ) {
-            surfaceWidth = width
-            surfaceHeight = height
             logInfo("[VIDEO_SURFACE_VIEW] Surface: ${width}x$height", tag = "UI")
 
             if (isSurfaceCreated) {
@@ -81,10 +75,7 @@ class VideoSurfaceView
         override fun surfaceDestroyed(holder: SurfaceHolder) {
             logWarn("[VIDEO_SURFACE_VIEW] Surface destroyed", tag = "UI")
             isSurfaceCreated = false
-            surfaceWidth = 0
-            surfaceHeight = 0
             callback?.onSurfaceDestroyed()
         }
 
-        fun getSurface(): Surface? = if (isSurfaceCreated) holder.surface else null
     }

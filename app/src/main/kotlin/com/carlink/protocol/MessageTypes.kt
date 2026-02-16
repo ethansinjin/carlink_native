@@ -5,7 +5,6 @@ package com.carlink.protocol
 // This file defines all protocol enums, constants, and data classes for
 // communicating with Carlinkit wireless CarPlay/Android Auto adapters.
 //
-// Ported from: lib/common.dart
 
 /** Magic number for protocol message headers. */
 const val PROTOCOL_MAGIC: Int = 0x55aa55aa
@@ -370,6 +369,7 @@ enum class MediaType(
 ) {
     DATA(1),
     ALBUM_COVER(3),
+    NAVI_JSON(200),
     UNKNOWN(-1),
     ;
 

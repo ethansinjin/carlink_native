@@ -32,8 +32,6 @@ private const val MAX_PAYLOAD_SIZE = 2 * 1024 * 1024 // 2MB — reject corrupted
  * - Connection lifecycle management
  * - Bulk transfer operations for data exchange
  * - Interface claiming and endpoint configuration
- *
- * Ported from: lib/driver/usb/usb_device_wrapper.dart
  */
 class UsbDeviceWrapper(
     private val context: Context,

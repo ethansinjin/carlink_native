@@ -105,6 +105,9 @@ fun AdapterConfigurationDialog(
     val savedVideoResolution by adapterConfigPreference.videoResolutionFlow.collectAsStateWithLifecycle(
         initialValue = VideoResolutionConfig.AUTO,
     )
+    val savedFps by adapterConfigPreference.fpsFlow.collectAsStateWithLifecycle(
+        initialValue = FpsConfig.DEFAULT,
+    )
 
     // Get usable display dimensions based on current display mode
     // FULLSCREEN_IMMERSIVE: Use full display bounds (bars are hidden)
@@ -157,6 +160,7 @@ fun AdapterConfigurationDialog(
     var selectedCallQuality by remember { mutableStateOf(savedCallQuality) }
     var selectedMediaDelay by remember { mutableStateOf(savedMediaDelay) }
     var selectedVideoResolution by remember { mutableStateOf(savedVideoResolution) }
+    var selectedFps by remember { mutableStateOf(savedFps) }
 
     // Sync local state when saved value loads (for initial load)
     LaunchedEffect(savedAudioSource) { selectedAudioSource = savedAudioSource }
@@ -165,6 +169,7 @@ fun AdapterConfigurationDialog(
     LaunchedEffect(savedCallQuality) { selectedCallQuality = savedCallQuality }
     LaunchedEffect(savedMediaDelay) { selectedMediaDelay = savedMediaDelay }
     LaunchedEffect(savedVideoResolution) { selectedVideoResolution = savedVideoResolution }
+    LaunchedEffect(savedFps) { selectedFps = savedFps }
 
     // Track if any changes were made
     // All adapter configuration changes require app restart
@@ -174,7 +179,8 @@ fun AdapterConfigurationDialog(
             selectedWifiBand != savedWifiBand ||
             selectedCallQuality != savedCallQuality ||
             selectedMediaDelay != savedMediaDelay ||
-            selectedVideoResolution != savedVideoResolution
+            selectedVideoResolution != savedVideoResolution ||
+            selectedFps != savedFps
 
     // Responsive dialog width - 60% of container width, clamped between 320dp and 600dp
     val windowInfo = LocalWindowInfo.current
@@ -341,7 +347,7 @@ fun AdapterConfigurationDialog(
                             text =
                                 when (selectedWifiBand) {
                                     WiFiBandConfig.BAND_5GHZ -> "Better speed, less interference (recommended)"
-                                    WiFiBandConfig.BAND_24GHZ -> "Better range, more interference"
+                                    WiFiBandConfig.BAND_24GHZ -> "Fallback (Slow NOT recommended)"
                                 },
                             style = MaterialTheme.typography.bodySmall,
                             color = colorScheme.primary,
@@ -526,6 +532,43 @@ fun AdapterConfigurationDialog(
                             )
                         }
                     }
+
+                    // Frame Rate Configuration
+                    ConfigurationOptionCard(
+                        title = "Frame Rate",
+                        description = "FPS for CarPlay/Android Auto projection",
+                        icon = Icons.Default.Speed,
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            AudioSourceButton(
+                                label = "30 FPS",
+                                icon = Icons.Default.Speed,
+                                isSelected = selectedFps == FpsConfig.FPS_30,
+                                onClick = { selectedFps = FpsConfig.FPS_30 },
+                                modifier = Modifier.weight(1f),
+                            )
+                            AudioSourceButton(
+                                label = "60 FPS",
+                                icon = Icons.Default.Speed,
+                                isSelected = selectedFps == FpsConfig.FPS_60,
+                                onClick = { selectedFps = FpsConfig.FPS_60 },
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text =
+                                when (selectedFps) {
+                                    FpsConfig.FPS_30 -> "Some Jitter, Lower overhead(Default)"
+                                    FpsConfig.FPS_60 -> "Smoother animations, More Processing"
+                                },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colorScheme.primary,
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(24.dp))
@@ -563,7 +606,7 @@ fun AdapterConfigurationDialog(
                     // Apply & Restart button - all adapter config changes require restart
                     Button(
                         onClick = {
-                            logWarn("[UI_ACTION] Adapter Config: Apply & Restart clicked - audio=$selectedAudioSource, mic=$selectedMicSource, wifi=$selectedWifiBand, callQuality=$selectedCallQuality, mediaDelay=$selectedMediaDelay, resolution=${selectedVideoResolution.toStorageString()}", tag = "UI")
+                            logWarn("[UI_ACTION] Adapter Config: Apply & Restart clicked - audio=$selectedAudioSource, mic=$selectedMicSource, wifi=$selectedWifiBand, callQuality=$selectedCallQuality, mediaDelay=$selectedMediaDelay, resolution=${selectedVideoResolution.toStorageString()}, fps=${selectedFps.fps}", tag = "UI")
                             scope.launch {
                                 // Save all configuration
                                 adapterConfigPreference.setAudioSource(selectedAudioSource)
@@ -572,6 +615,7 @@ fun AdapterConfigurationDialog(
                                 adapterConfigPreference.setCallQuality(selectedCallQuality)
                                 adapterConfigPreference.setMediaDelay(selectedMediaDelay)
                                 adapterConfigPreference.setVideoResolution(selectedVideoResolution)
+                                adapterConfigPreference.setFps(selectedFps)
 
                                 // All adapter config changes require restart
                                 carlinkManager?.stop()

@@ -45,6 +45,8 @@ object Logger {
         const val USB_RAW = "USB_RAW"
         const val AUDIO_DEBUG = "AUDIO_DEBUG"
         const val ERROR_RECOVERY = "ERROR_RECOVERY"
+        const val NAVI = "NAVI"
+        const val CLUSTER = "CLUSTER"
 
         // Video Pipeline Debug Tags
         const val VIDEO_USB = "VIDEO_USB"
@@ -307,3 +309,5 @@ inline fun logVideoCodec(message: () -> String) = logDebugOnly(Logger.Tags.VIDEO
 inline fun logVideoSurface(message: () -> String) = logDebugOnly(Logger.Tags.VIDEO_SURFACE, message)
 
 inline fun logVideoPerf(message: () -> String) = logDebugOnly(Logger.Tags.VIDEO_PERF, message)
+
+inline fun logNavi(message: () -> String) = logDebugOnly(Logger.Tags.NAVI, message)

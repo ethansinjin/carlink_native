@@ -21,7 +21,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
+
 import java.util.concurrent.locks.LockSupport;
 
 import com.carlink.BuildConfig;
@@ -38,7 +38,7 @@ public class H264Renderer {
     }
 
     /** Pre-allocated frame buffer for staging between USB and feeder threads.
-     *  Ownership transfer via AtomicReference provides happens-before guarantee. */
+     *  Ownership transfer via SPSC ring buffer with volatile indices provides happens-before guarantee. */
     private static final class StagedFrame {
         final byte[] data;
         int length;
@@ -56,6 +56,7 @@ public class H264Renderer {
     private int height;
     private Surface surface;
     private volatile boolean running = false;
+    private volatile java.util.Timer retryTimer;  // Stored for cancellation in stop()
     private final LogCallback logCallback;
     private KeyframeRequestCallback keyframeCallback;
 
@@ -147,6 +148,10 @@ public class H264Renderer {
     // First-frame flag — survives logStats() counter resets
     private volatile boolean firstFrameLogged = false;
 
+    // Sync gate — discard P-frames until first SPS/PPS+IDR arrives.
+    // Prevents feeding undecodable frames if initial keyframe bundle is lost.
+    private volatile boolean syncAcquired = false;
+
     // Monotonic frame counter for PTS
     private final AtomicLong frameCounter = new AtomicLong(0);
 
@@ -155,17 +160,26 @@ public class H264Renderer {
     // on different threads (codec internal thread, executor, main thread).
     private final Object codecLock = new Object();
 
-    // Single-slot staging: USB thread writes here, feeder thread reads.
-    // 3 buffers guarantee USB thread always has a write buffer available.
+    // FIFO staging queue (SPSC ring): USB thread writes, feeder thread reads.
+    // 4-slot power-of-2 ring (3 usable) absorbs USB frame bursts without overwrites.
+    // 6 buffers: 1 write + up to 3 in queue + 1 feeder + 1 pool margin.
     private static final int STAGED_FRAME_CAPACITY = 512 * 1024;  // 512KB, covers 1080p I-frames
-    private static final int STAGED_FRAME_COUNT = 3;               // write + pending + feed
+    private static final int STAGED_FRAME_COUNT = 6;               // write + queue(3) + feed + margin
+    private static final int STAGING_QUEUE_SLOTS = 4;              // power-of-2, 3 usable slots
 
-    private final AtomicReference<StagedFrame> pendingFrame = new AtomicReference<>(null);
+    private final StagedFrame[] stagingQueue = new StagedFrame[STAGING_QUEUE_SLOTS];
+    private volatile int sqHead = 0;  // written by USB thread only
+    private volatile int sqTail = 0;  // written by feeder thread only
     private final ConcurrentLinkedQueue<StagedFrame> framePool = new ConcurrentLinkedQueue<>();
     private StagedFrame writeFrame;                                // USB thread only
     private volatile Thread feederThread;
     private final AtomicLong stagingDropCount = new AtomicLong(0);
     private final AtomicLong oversizedDropCount = new AtomicLong(0);
+
+    // Fix A: Reactive keyframe request after staging drops
+    private volatile boolean stagingOverwriteDetected = false;
+    private volatile long lastReactiveKeyframeTimeNs = 0;
+    private static final long REACTIVE_KEYFRAME_COOLDOWN_NS = 500_000_000L;  // 500ms
 
     public H264Renderer(int width, int height, Surface surface, LogCallback logCallback,
                         AppExecutors executors, String preferredDecoderName) {
@@ -202,6 +216,7 @@ public class H264Renderer {
         totalFramesDecoded.set(0);
         frameCounter.set(0);
         firstFrameLogged = false;
+        syncAcquired = false;
 
         log("start - " + width + "x" + height);
 
@@ -214,10 +229,21 @@ public class H264Renderer {
         } catch (Exception e) {
             log("start error: " + e);
             stopStaging();
+
+            // Release the codec created by initCodec() to prevent native MediaCodec leak.
+            // Without this, each failed retry overwrites mCodec in initCodec() without
+            // releasing the previous instance, exhausting the hardware codec pool (1-3
+            // instances on Intel Atom). release() is safe from any codec state per Android docs.
+            if (mCodec != null) {
+                try { mCodec.release(); } catch (Exception re) { /* ignore */ }
+                mCodec = null;
+            }
+
             running = false;
 
             log("restarting in 5s");
-            new java.util.Timer().schedule(new java.util.TimerTask() {
+            retryTimer = new java.util.Timer();
+            retryTimer.schedule(new java.util.TimerTask() {
                 @Override
                 public void run() {
                     start();
@@ -227,6 +253,14 @@ public class H264Renderer {
     }
 
     public void stop() {
+        // Cancel any pending start() retry to prevent resurrection after stop().
+        // CarlinkManager handles reconnection at a higher level — the renderer
+        // should not autonomously restart after being explicitly stopped.
+        if (retryTimer != null) {
+            retryTimer.cancel();
+            retryTimer = null;
+        }
+
         if (!running) return;
 
         running = false;
@@ -397,12 +431,19 @@ public class H264Renderer {
 
     /** Initialize staging buffers and start the feeder thread. Call after mCodec.start(). */
     private void initStaging() {
-        pendingFrame.set(null);
+        // Clear FIFO queue
+        for (int i = 0; i < STAGING_QUEUE_SLOTS; i++) {
+            stagingQueue[i] = null;
+        }
+        sqHead = 0;
+        sqTail = 0;
         framePool.clear();
         stagingDropCount.set(0);
         oversizedDropCount.set(0);
+        stagingOverwriteDetected = false;
+        lastReactiveKeyframeTimeNs = 0;
 
-        // Allocate 3 StagedFrames: 1 → writeFrame, 2 → framePool
+        // Allocate 6 StagedFrames: 1 → writeFrame, 5 → framePool
         writeFrame = new StagedFrame(STAGED_FRAME_CAPACITY);
         for (int i = 1; i < STAGED_FRAME_COUNT; i++) {
             framePool.offer(new StagedFrame(STAGED_FRAME_CAPACITY));
@@ -430,20 +471,66 @@ public class H264Renderer {
                 debugLog("Feeder thread did not exit within 1s");
             }
         }
-        pendingFrame.set(null);
+        // Clear FIFO queue
+        for (int i = 0; i < STAGING_QUEUE_SLOTS; i++) {
+            stagingQueue[i] = null;
+        }
+        sqHead = 0;
+        sqTail = 0;
         framePool.clear();
         writeFrame = null;
     }
 
-    /** Feeder thread main loop — takes frames from pendingFrame and feeds to codec. */
+    /** Offer a frame to the SPSC staging queue. Called from USB thread only.
+     *  @return true if enqueued, false if queue full (caller must handle drop). */
+    private boolean stagingOffer(StagedFrame frame) {
+        int next = (sqHead + 1) & (STAGING_QUEUE_SLOTS - 1);
+        if (next == sqTail) return false;  // full
+        stagingQueue[sqHead] = frame;
+        sqHead = next;  // volatile write publishes
+        return true;
+    }
+
+    /** Poll a frame from the SPSC staging queue. Called from feeder thread only.
+     *  @return next frame, or null if queue empty. */
+    private StagedFrame stagingPoll() {
+        int t = sqTail;
+        if (t == sqHead) return null;  // empty
+        StagedFrame f = stagingQueue[t];
+        stagingQueue[t] = null;
+        sqTail = (t + 1) & (STAGING_QUEUE_SLOTS - 1);  // volatile write
+        return f;
+    }
+
+    /** Feeder thread main loop — drains FIFO staging queue and feeds to codec. */
     private void feederLoop() {
         android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DISPLAY);
         try {
             while (running) {
-                StagedFrame frame = pendingFrame.getAndSet(null);
+                StagedFrame frame = stagingPoll();
                 if (frame != null) {
                     feedFrameToCodec(frame);
                     framePool.offer(frame);
+
+                    // Fix A: After feeding, check if a staging drop occurred → request reactive keyframe
+                    if (stagingOverwriteDetected) {
+                        stagingOverwriteDetected = false;
+                        long now = System.nanoTime();
+                        if (now - lastReactiveKeyframeTimeNs > REACTIVE_KEYFRAME_COOLDOWN_NS) {
+                            lastReactiveKeyframeTimeNs = now;
+                            KeyframeRequestCallback cb = keyframeCallback;
+                            if (cb != null) {
+                                executors.mediaCodec1().execute(() -> {
+                                    try {
+                                        cb.onKeyframeNeeded();
+                                        debugLog("[KEYFRAME] Reactive keyframe request after staging drop");
+                                    } catch (Exception e) {
+                                        debugLog("[KEYFRAME] Reactive request failed: " + e);
+                                    }
+                                });
+                            }
+                        }
+                    }
                 } else {
                     LockSupport.parkNanos(1_000_000L);  // 1ms — 0.5ms avg added latency
                 }
@@ -457,6 +544,19 @@ public class H264Renderer {
     /** Feed a staged frame to the codec. Called only from feeder thread. */
     private void feedFrameToCodec(StagedFrame frame) {
         if (mCodec == null) return;
+
+        // Gate: discard frames until first SPS/PPS+IDR sync point.
+        // Adapter bundles SPS+PPS+IDR as one payload — getNalType() returns SPS (first NAL).
+        if (!syncAcquired) {
+            int nalType = getNalType(frame.data, 0, frame.length);
+            if (nalType == NAL_SPS || nalType == NAL_IDR) {
+                syncAcquired = true;
+                log("[VIDEO] Sync acquired (" + nalTypeToString(nalType) + "), feeding to codec");
+            } else {
+                debugLog("DROP pre-sync frame (" + nalTypeToString(nalType) + " " + frame.length + "B)");
+                return;
+            }
+        }
 
         Integer index = codecAvailableBufferIndexes.poll();
         if (index == null) {
@@ -543,12 +643,12 @@ public class H264Renderer {
 
     /**
      * Stage H.264 data for codec feeding. GC-immune USB thread fast path.
-     * Called from USB-ReadLoop thread. [SINGLE_SLOT_HANDOFF] implementation.
+     * Called from USB-ReadLoop thread. [FIFO_STAGING] implementation.
      *
-     * USB → System.arraycopy → AtomicReference.getAndSet(). No JNI, no codec calls.
+     * USB → System.arraycopy → SPSC ring offer. No JNI, no codec calls.
      * Feeder thread handles all codec interaction on its own timeline.
      *
-     * @return true if frame was staged, false if dropped (oversized or no buffer)
+     * @return true if frame was staged, false if dropped (oversized, no buffer, or queue full)
      */
     public boolean feedDirect(byte[] data, int offset, int length) {
         if (!running) return false;
@@ -570,27 +670,26 @@ public class H264Renderer {
         wf.length = length;
         wf.timestamp = frameCounter.getAndIncrement();
 
-        // Atomic publish — feeder thread takes ownership
-        StagedFrame prev = pendingFrame.getAndSet(wf);
-
-        if (prev != null) {
-            // Previous frame was overwritten before feeder could take it — staging drop.
-            // Reuse prev as next writeFrame (it's ours now).
+        // FIFO enqueue — feeder thread drains in order
+        if (stagingOffer(wf)) {
+            // Frame enqueued — get a fresh buffer from pool for next write
+            writeFrame = framePool.poll();
+            // writeFrame may be null briefly if feeder hasn't returned buffers yet.
+            // Next feedDirect() call will return false (null guard above). This is fine —
+            // the feeder will return buffers to the pool within ~1ms.
+        } else {
+            // Queue full — drop incoming frame (preserves FIFO order of already-queued frames).
+            // wf stays as writeFrame for reuse (data will be overwritten next call).
             stagingDropCount.incrementAndGet();
-            int nalType = getNalType(prev.data, 0, prev.length);
+            stagingOverwriteDetected = true;
+            int nalType = getNalType(wf.data, 0, wf.length);
             if (nalType == NAL_IDR) {
                 long sessionTotal = sessionIdrDrops.incrementAndGet();
                 idrDropCount.incrementAndGet();
-                debugLog("STAGE overwrite IDR size=" + prev.length + " idrDrops=" + sessionTotal);
-                log("[VIDEO] WARNING: Staging overwrite dropped IDR (" + prev.length + "B). Session IDR drops: " + sessionTotal);
+                debugLog("STAGE queue-full IDR size=" + wf.length + " idrDrops=" + sessionTotal);
+                log("[VIDEO] WARNING: Staging queue full, dropped IDR (" + wf.length + "B). Session IDR drops: " + sessionTotal);
             }
-            writeFrame = prev;
-        } else {
-            // Feeder took the previous frame — get a fresh buffer from pool
-            writeFrame = framePool.poll();
-            // writeFrame may be null briefly if feeder hasn't returned its buffer yet.
-            // Next feedDirect() call will return false (null guard above). This is fine —
-            // the feeder will return the buffer to the pool within ~1ms.
+            return false;
         }
 
         return true;
@@ -642,7 +741,7 @@ public class H264Renderer {
             long stageDrops = stagingDropCount.getAndSet(0);
             long oversized = oversizedDropCount.getAndSet(0);
             if (stageDrops > 0 || oversized > 0) {
-                sb.append(" STAGE[overwrite:").append(stageDrops)
+                sb.append(" STAGE[drop:").append(stageDrops)
                   .append(" oversized:").append(oversized).append("]");
             }
 

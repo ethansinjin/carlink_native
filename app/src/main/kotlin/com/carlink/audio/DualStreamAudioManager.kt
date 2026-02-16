@@ -84,7 +84,6 @@ class DualStreamAudioManager(
     private var playbackThread: AudioPlaybackThread? = null
     private val isRunning = AtomicBoolean(false)
 
-    private var startTime: Long = 0
     private var mediaUnderruns: Int = 0
     private var navUnderruns: Int = 0
     private var writeCount: Long = 0
@@ -132,7 +131,6 @@ class DualStreamAudioManager(
             }
 
             try {
-                startTime = System.currentTimeMillis()
                 isRunning.set(true)
 
                 // Start playback thread
@@ -401,57 +399,6 @@ class DualStreamAudioManager(
         }
     }
 
-    fun setMediaVolume(volume: Float) {
-        synchronized(lock) {
-            mediaVolume = volume.coerceIn(0.0f, 1.0f)
-            val effectiveVolume = if (isDucked) mediaVolume * duckLevel else mediaVolume
-            mediaTrack?.setVolume(effectiveVolume)
-        }
-    }
-
-    fun setNavVolume(volume: Float) {
-        synchronized(lock) {
-            navVolume = volume.coerceIn(0.0f, 1.0f)
-            navTrack?.setVolume(navVolume)
-        }
-    }
-
-    /**
-     * Check if audio is currently playing.
-     */
-    fun isPlaying(): Boolean =
-        isRunning.get() && (
-            mediaTrack?.playState == AudioTrack.PLAYSTATE_PLAYING ||
-                navTrack?.playState == AudioTrack.PLAYSTATE_PLAYING
-        )
-
-    /**
-     * Get statistics about audio playback.
-     */
-    fun getStats(): Map<String, Any> {
-        synchronized(lock) {
-            val durationMs = if (startTime > 0) System.currentTimeMillis() - startTime else 0
-
-            return mapOf(
-                "isRunning" to isRunning.get(),
-                "durationSeconds" to durationMs / 1000.0,
-                "mediaVolume" to mediaVolume,
-                "navVolume" to navVolume,
-                "isDucked" to isDucked,
-                "duckLevel" to duckLevel,
-                "mediaFormat" to (mediaFormat?.let { "${it.sampleRate}Hz ${it.channelCount}ch" } ?: "none"),
-                "navFormat" to (navFormat?.let { "${it.sampleRate}Hz ${it.channelCount}ch" } ?: "none"),
-                "mediaBuffer" to (mediaBuffer?.getStats() ?: emptyMap()),
-                "navBuffer" to (navBuffer?.getStats() ?: emptyMap()),
-                "mediaUnderruns" to mediaUnderruns,
-                "navUnderruns" to navUnderruns,
-                "navEndMarkersDetected" to navEndMarkersDetected,
-                "navWarmupFramesSkipped" to navWarmupFramesSkipped,
-                "zeroPacketsFiltered" to zeroPacketsFiltered,
-            )
-        }
-    }
-
     // ========== Stream Stop Methods ==========
     //
     // These methods pause individual AudioTracks when their corresponding stream ends
@@ -533,19 +480,6 @@ class DualStreamAudioManager(
     }
 
     private var navPackets: Long = 0
-
-    /** Pause media track (AudioMediaStop/AudioOutputStop). */
-    fun stopMediaTrack() {
-        synchronized(lock) {
-            mediaTrack?.let { track ->
-                if (track.playState == AudioTrack.PLAYSTATE_PLAYING) {
-                    track.pause()
-                    log("[AUDIO] Media track paused - stream ended")
-                }
-            }
-            mediaStarted = false
-        }
-    }
 
     /** Stop playback and release all resources. */
     fun release() {
@@ -744,8 +678,17 @@ class DualStreamAudioManager(
     private fun releaseMediaTrack() {
         try {
             mediaTrack?.let { track ->
-                if (track.playState == AudioTrack.PLAYSTATE_PLAYING) {
-                    track.stop()
+                // Nest stop() in its own try-catch so release() always runs.
+                // AudioTrack.stop() can throw IllegalStateException if native state
+                // changed between the playState check and the call (TOCTOU race with
+                // audio HAL during CPC200 disconnect or format switch). AOSP's own
+                // AudioTrack.release() uses this same pattern internally.
+                try {
+                    if (track.playState == AudioTrack.PLAYSTATE_PLAYING) {
+                        track.stop()
+                    }
+                } catch (e: Exception) {
+                    log("[AUDIO] WARN: Failed to stop media track: ${e.message}")
                 }
                 track.release()
             }
@@ -760,7 +703,11 @@ class DualStreamAudioManager(
     private fun releaseNavTrack() {
         try {
             navTrack?.let { track ->
-                if (track.playState == AudioTrack.PLAYSTATE_PLAYING) track.stop()
+                try {
+                    if (track.playState == AudioTrack.PLAYSTATE_PLAYING) track.stop()
+                } catch (e: Exception) {
+                    log("[AUDIO] WARN: Failed to stop nav track: ${e.message}")
+                }
                 track.release()
             }
         } catch (e: Exception) {
@@ -783,6 +730,15 @@ class DualStreamAudioManager(
         private val mediaTempBuffer = ByteArray(playbackChunkSize)
         private val navTempBuffer = ByteArray(playbackChunkSize)
 
+        // Residual tracking for partial WRITE_NON_BLOCKING returns.
+        // Per Android docs, non-blocking write may return fewer bytes than requested
+        // when the AudioTrack's internal buffer is partially full. Unwritten bytes
+        // are retried on the next loop iteration to prevent audio discontinuities.
+        private var mediaResidualOffset = 0
+        private var mediaResidualCount = 0
+        private var navResidualOffset = 0
+        private var navResidualCount = 0
+
         override fun run() {
             Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
             log("[AUDIO] Playback thread started with URGENT_AUDIO priority")
@@ -803,8 +759,27 @@ class DualStreamAudioManager(
                                     log("[AUDIO] Media pre-fill complete: ${currentFillMs}ms buffered, starting playback")
                                 }
 
-                                // Maintain minimum buffer to absorb jitter
-                                if (currentFillMs <= minBufferLevelMs) return@let
+                                // Retry residual from prior partial WRITE_NON_BLOCKING
+                                if (mediaResidualCount > 0) {
+                                    val written = track.write(
+                                        mediaTempBuffer, mediaResidualOffset,
+                                        mediaResidualCount, AudioTrack.WRITE_NON_BLOCKING,
+                                    )
+                                    if (written < 0) {
+                                        mediaResidualCount = 0
+                                        handleTrackError("MEDIA", written)
+                                        return@let
+                                    }
+                                    if (written > 0) {
+                                        mediaResidualOffset += written
+                                        mediaResidualCount -= written
+                                        didWork = true
+                                    }
+                                }
+
+                                // Maintain minimum buffer to absorb jitter;
+                                // also skip new reads while residual is pending (AudioTrack full)
+                                if (mediaResidualCount > 0 || currentFillMs <= minBufferLevelMs) return@let
 
                                 val available = buffer.availableForRead()
                                 if (available > 0) {
@@ -828,7 +803,11 @@ class DualStreamAudioManager(
                                                 handleTrackError("MEDIA", written)
                                                 return@let
                                             }
-                                            didWork = true
+                                            if (written < bytesRead) {
+                                                mediaResidualOffset = written
+                                                mediaResidualCount = bytesRead - written
+                                            }
+                                            if (written > 0) didWork = true
                                         }
                                     }
                                 }
@@ -871,8 +850,28 @@ class DualStreamAudioManager(
                                     log("[AUDIO] Nav pre-fill complete: ${currentNavFillMs}ms buffered, starting playback")
                                 }
 
+                                // Retry residual from prior partial WRITE_NON_BLOCKING
+                                if (navResidualCount > 0) {
+                                    val written = track.write(
+                                        navTempBuffer, navResidualOffset,
+                                        navResidualCount, AudioTrack.WRITE_NON_BLOCKING,
+                                    )
+                                    if (written < 0) {
+                                        navResidualCount = 0
+                                        handleTrackError("NAV", written)
+                                        return@let
+                                    }
+                                    if (written > 0) {
+                                        navResidualOffset += written
+                                        navResidualCount -= written
+                                        AudioDebugLogger.logNavTrackWrite(written, buffer.fillLevelMs())
+                                        didWork = true
+                                    }
+                                }
+
                                 val navMinBufferMs = minBufferLevelMs / 2
-                                if (currentNavFillMs <= navMinBufferMs) return@let
+                                // Also skip new reads while residual is pending (AudioTrack full)
+                                if (navResidualCount > 0 || currentNavFillMs <= navMinBufferMs) return@let
 
                                 val available = buffer.availableForRead()
                                 if (available > 0) {
@@ -896,8 +895,14 @@ class DualStreamAudioManager(
                                                 handleTrackError("NAV", written)
                                                 return@let
                                             }
-                                            AudioDebugLogger.logNavTrackWrite(written, buffer.fillLevelMs())
-                                            didWork = true
+                                            if (written < bytesRead) {
+                                                navResidualOffset = written
+                                                navResidualCount = bytesRead - written
+                                            }
+                                            if (written > 0) {
+                                                AudioDebugLogger.logNavTrackWrite(written, buffer.fillLevelMs())
+                                                didWork = true
+                                            }
                                         }
                                     }
                                 }

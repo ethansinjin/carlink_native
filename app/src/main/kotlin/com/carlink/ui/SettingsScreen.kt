@@ -71,6 +71,7 @@ import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.carlink.BuildConfig
 import com.carlink.CarlinkManager
 import com.carlink.logging.FileLogManager
 import com.carlink.logging.logInfo
@@ -153,13 +154,13 @@ fun SettingsScreen(
                 }
 
                 // NavigationRail with tabs - Expanded to fill available space
-                // Items centered vertically to match Flutter NavigationRail behavior
+                // Items centered vertically
                 NavigationRail(
                     modifier = Modifier.weight(1f),
                     containerColor = colorScheme.surface,
                 ) {
                     Spacer(modifier = Modifier.weight(1f))
-                    SettingsTab.entries.forEach { tab ->
+                    SettingsTab.entries.filter { !BuildConfig.DEBUG || it != SettingsTab.LOGS }.forEach { tab ->
                         NavigationRailItem(
                             selected = selectedTab == tab,
                             onClick = {

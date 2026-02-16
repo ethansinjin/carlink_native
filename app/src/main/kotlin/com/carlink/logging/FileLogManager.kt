@@ -4,13 +4,15 @@ import android.content.Context
 import java.io.File
 import java.io.FileOutputStream
 import java.io.OutputStreamWriter
-import java.text.SimpleDateFormat
-import java.util.Date
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
@@ -29,6 +31,11 @@ class FileLogManager(
         private const val LOGS_DIR = "logs"
         private const val FLUSH_INTERVAL_MS = 1000L
         private const val SHUTDOWN_TIMEOUT_MS = 2000L
+        // Producer-side backpressure: drop messages when queue exceeds this size.
+        // Prevents unbounded memory growth under DEBUG/VIDEO_PIPELINE presets
+        // (~350 bytes/msg × 5000 = ~1.7MB max queue footprint). Uses O(1)
+        // AtomicInteger check instead of ConcurrentLinkedQueue.size() which is O(n).
+        private const val MAX_QUEUE_SIZE = 5000
 
         @Volatile
         private var instance: FileLogManager? = null
@@ -48,10 +55,13 @@ class FileLogManager(
     private val writerLock = ReentrantLock()
 
     private val logQueue = ConcurrentLinkedQueue<String>()
+    private val queueSize = AtomicInteger(0)
     private val executor = Executors.newSingleThreadScheduledExecutor()
     private val isEnabled = AtomicBoolean(false)
-    private val dateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS", Locale.US)
-    private val fileDateFormat = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US)
+    private val dateFormat: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS", Locale.US)
+        .withZone(ZoneId.systemDefault())
+    private val fileDateFormat: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss", Locale.US)
+        .withZone(ZoneId.systemDefault())
 
     init {
         logsDir =
@@ -59,7 +69,7 @@ class FileLogManager(
                 if (!exists()) mkdirs()
             }
 
-        sessionId = "${sessionPrefix}_${fileDateFormat.format(Date())}"
+        sessionId = "${sessionPrefix}_${fileDateFormat.format(Instant.now())}"
 
         executor.scheduleAtFixedRate(
             { flushQueueInternal() },
@@ -156,16 +166,22 @@ class FileLogManager(
         timestamp: Long,
     ) {
         if (!isEnabled.get()) return
+        if (queueSize.get() >= MAX_QUEUE_SIZE) return  // backpressure: drop under flood
 
-        val formattedTime = dateFormat.format(Date(timestamp))
+        val formattedTime = dateFormat.format(Instant.ofEpochMilli(timestamp))
         val levelStr = level.name.first()
         val tagStr = tag?.let { "[$it] " } ?: ""
         val line = "$formattedTime $levelStr $tagStr$message\n"
 
         logQueue.offer(line)
+        queueSize.incrementAndGet()
     }
 
-    // Internal flush called by executor - uses lock for writer access
+    // Internal flush called by executor - uses lock for writer access.
+    // Drains the entire queue each cycle (no cap). The previous 100-entry cap
+    // caused unbounded queue growth under VIDEO_PIPELINE/DEBUG presets that
+    // produce >100 msg/sec. Producer-side MAX_QUEUE_SIZE backpressure in onLog()
+    // prevents runaway memory growth from logging bugs.
     private fun flushQueueInternal() {
         if (!isEnabled.get() && logQueue.isEmpty()) return
 
@@ -176,13 +192,14 @@ class FileLogManager(
                 val batch = StringBuilder()
                 var count = 0
 
-                while (count < 100) {
+                while (true) {
                     val line = logQueue.poll() ?: break
                     batch.append(line)
                     count++
                 }
 
-                if (batch.isNotEmpty()) {
+                if (count > 0) {
+                    queueSize.addAndGet(-count)
                     writer.write(batch.toString())
                     writer.flush()
 
@@ -227,7 +244,7 @@ class FileLogManager(
                 appendLine("Carlink Native Log Session")
                 appendLine("Session ID: $sessionId")
                 appendLine("App Version: $appVersion")
-                appendLine("Started: ${dateFormat.format(Date())}")
+                appendLine("Started: ${dateFormat.format(Instant.now())}")
                 appendLine("Device: ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}")
                 appendLine("Android: ${android.os.Build.VERSION.RELEASE} (API ${android.os.Build.VERSION.SDK_INT})")
                 appendLine("=".repeat(60))

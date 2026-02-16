@@ -10,8 +10,6 @@ import java.nio.charset.StandardCharsets
  *
  * Serializes message objects into binary format for transmission to the Carlinkit adapter.
  * Handles header generation, payload encoding, and type-specific serialization.
- *
- * Ported from: lib/driver/sendable.dart
  */
 object MessageSerializer {
     /**
@@ -386,9 +384,6 @@ object MessageSerializer {
         // Box name
         messages.add(serializeString(config.boxName, FileAddress.BOX_NAME))
 
-        // AirPlay configuration
-        messages.add(serializeString(generateAirplayConfig(config), FileAddress.AIRPLAY_CONFIG))
-
         // Charge mode: 0 = off (no quick charge), 1 = quick charge enabled
         messages.add(serializeNumber(0, FileAddress.CHARGE_MODE))
 
@@ -403,6 +398,10 @@ object MessageSerializer {
 
         // Box settings JSON (includes sample rate, call quality)
         messages.add(serializeBoxSettings(config))
+
+        // AirPlay configuration AFTER BoxSettings — firmware rewrites airplay.conf
+        // during BoxSettings processing, so this must come last to persist oemIconLabel
+        messages.add(serializeString(generateAirplayConfig(config), FileAddress.AIRPLAY_CONFIG))
 
         // Microphone source
         val micCommand = if (config.micType == "box") CommandMapping.BOX_MIC else CommandMapping.MIC

@@ -22,7 +22,9 @@ import com.carlink.protocol.AudioCommand
 import com.carlink.protocol.AudioDataMessage
 import com.carlink.protocol.CommandMapping
 import com.carlink.protocol.CommandMessage
+import com.carlink.navigation.NavigationStateManager
 import com.carlink.protocol.MediaDataMessage
+import com.carlink.protocol.MediaType
 import com.carlink.protocol.Message
 import com.carlink.protocol.MessageSerializer
 import com.carlink.protocol.PhoneType
@@ -58,8 +60,6 @@ import java.util.concurrent.atomic.AtomicReference
  * - Audio playback via DualStreamAudioManager
  * - Microphone capture for Siri/calls
  * - MediaSession integration for AAOS
- *
- * Ported from: lib/carlink.dart
  */
 class CarlinkManager(
     private val context: Context,
@@ -72,7 +72,7 @@ class CarlinkManager(
         private const val USB_WAIT_PERIOD_MS = 3000L
         private const val PAIR_TIMEOUT_MS = 15000L
 
-        // Recovery constants (matches Flutter CarlinkPlugin.kt)
+        // Recovery constants
         private const val RESET_THRESHOLD = 3
         private const val RESET_WINDOW_MS = 30_000L
 
@@ -189,7 +189,7 @@ class CarlinkManager(
     // Phone type tracking for frame interval decisions
     private var currentPhoneType: PhoneType? = null
 
-    // Recovery tracking (matches Flutter CarlinkPlugin.kt)
+    // Recovery tracking
     private var lastResetTime: Long = 0
     private var consecutiveResets: Int = 0
 
@@ -218,6 +218,7 @@ class CarlinkManager(
         lastMediaAlbumName = null
         lastMediaAppName = null
         lastAlbumCover = null
+        NavigationStateManager.clear()
     }
 
     // Executors
@@ -518,6 +519,7 @@ class CarlinkManager(
                         WiFiBandConfig.BAND_24GHZ -> "24ghz"
                     },
                 callQuality = userConfig.callQuality.value,
+                fps = userConfig.fps.fps,
             )
         config = refreshedConfig // Update stored config for other uses
 
@@ -662,7 +664,6 @@ class CarlinkManager(
      * This operation resets the MediaCodec decoder without disconnecting the USB device.
      * Useful for recovering from video decoding errors or codec issues.
      *
-     * Matches Flutter: DeviceOperations.resetH264Renderer()
      */
     fun resetVideoDecoder() {
         logInfo("[DEVICE_OPS] Resetting H264 video decoder", tag = Logger.Tags.VIDEO)
@@ -1104,6 +1105,12 @@ class CarlinkManager(
     }
 
     private fun processMediaMetadata(message: MediaDataMessage) {
+        // Route NaviJSON to NavigationStateManager for cluster display
+        if (message.type == MediaType.NAVI_JSON) {
+            NavigationStateManager.onNaviJson(message.payload)
+            return
+        }
+
         val payload = message.payload
 
         // Extract new song title (if present)
@@ -1164,7 +1171,7 @@ class CarlinkManager(
     }
 
     /**
-     * Simple error handler matching Flutter CarlinkPlugin.kt pattern.
+     * Simple error handler for adapter communication failures.
      *
      * Recovery strategy (simple, proven):
      * 1. Check if error is recoverable
@@ -1286,7 +1293,6 @@ class CarlinkManager(
 
     /**
      * Checks if an error is recoverable.
-     * Matches Flutter: CarlinkPlugin.kt isRecoverableError()
      */
     private fun isRecoverableError(error: String): Boolean {
         val lowerError = error.lowercase()
@@ -1307,7 +1313,6 @@ class CarlinkManager(
 
     /**
      * Handles MediaCodec reset tracking with thread-safe error recovery.
-     * Matches Flutter: CarlinkPlugin.kt handleCodecReset()
      *
      * Synchronized to prevent race conditions when multiple threads
      * encounter errors simultaneously.
@@ -1341,7 +1346,6 @@ class CarlinkManager(
 
     /**
      * Performs emergency cleanup to prevent cascade failures.
-     * Matches Flutter: CarlinkPlugin.kt performEmergencyCleanup()
      *
      * Simple cleanup - just reset video and close USB.
      * Does NOT attempt automatic restart (let user/system decide).

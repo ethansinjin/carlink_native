@@ -16,8 +16,6 @@ import java.util.concurrent.atomic.AtomicLong
  * - Heartbeat keepalive
  * - Message sending and receiving
  * - Performance tracking
- *
- * Ported from: lib/driver/adaptr_driver.dart
  */
 class AdapterDriver(
     private val usbDevice: UsbDeviceWrapper,

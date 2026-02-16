@@ -11,7 +11,7 @@ android {
         applicationId = "zeno.carlink"
         minSdk = 32
         targetSdk = 36
-        versionCode = 68
+        versionCode = 70
         versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -53,6 +53,7 @@ android {
         // with microphone timing - Timer.scheduleAtFixedRate works reliably.
         // See documents/revisions.txt [19], [21] for history.
         disable += "DiscouragedApi"
+        disable += "Instantiatable"  // CarAppActivity from app-automotive AAR — false positive
     }
 }
 
@@ -62,10 +63,10 @@ dependencies {
 
     // AndroidX Core
     implementation("androidx.core:core-ktx:1.17.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.4")
-    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.9.4")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.9.4")
-    implementation("androidx.activity:activity-compose:1.12.3")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.10.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
+    implementation("androidx.activity:activity-compose:1.12.4")
 
     // DataStore for preferences persistence
     implementation("androidx.datastore:datastore-preferences:1.2.0")
@@ -74,7 +75,7 @@ dependencies {
     implementation("androidx.documentfile:documentfile:1.1.0")
 
     // Compose BOM
-    implementation(platform("androidx.compose:compose-bom:2026.01.01"))
+    implementation(platform("androidx.compose:compose-bom:2026.02.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
@@ -84,11 +85,15 @@ dependencies {
     // MediaSession for AAOS integration (uses MediaSessionCompat)
     implementation("androidx.media:media:1.7.1")
 
+    // Car App Library for AAOS cluster navigation (Templates Host)
+    implementation("androidx.car.app:app:1.7.0")
+    implementation("androidx.car.app:app-automotive:1.7.0")
+
     // Testing
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
-    androidTestImplementation(platform("androidx.compose:compose-bom:2026.01.01"))
+    androidTestImplementation(platform("androidx.compose:compose-bom:2026.02.00"))
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")

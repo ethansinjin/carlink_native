@@ -130,3 +130,6 @@
 [65] :: Dependency Updates
 [66] :: Video Direct Handoff to MediaCodec, no buffering. Codec is fed inline on the USB thread. NAL Type 30s logcat logging. Back to two audio output streams (Nav + Everything else) for simplification. Audio zero-copy, buffer tuning. Microphone cleanup. Just a bunch of cleaning up. Added media delay option to adapter config
 [67] :: Decoupling (Single-Slot Handoff) Video-Audio to allow interrupted Video and Audio if GC Pressure occurs.
+[68] :: Some Code cleanup
+[69] :: Nice. More cleanup. Testing cmd inject for oemIconLabel
+[70] :: Navi Metadata testing. Hybrid CarApp Activity 'silently' opens without taking focus from MainActivity.

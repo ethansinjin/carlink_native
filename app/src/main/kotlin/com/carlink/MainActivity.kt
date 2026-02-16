@@ -10,6 +10,8 @@ import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -41,6 +43,7 @@ import com.carlink.logging.Logger
 import com.carlink.logging.apply
 import com.carlink.logging.logInfo
 import com.carlink.logging.logWarn
+import com.carlink.cluster.ClusterBindingState
 import com.carlink.protocol.AdapterConfig
 import com.carlink.protocol.KnownDevices
 import com.carlink.ui.MainScreen
@@ -61,8 +64,6 @@ import com.carlink.util.VideoDebugLogger
  * - Permission handling (microphone, USB)
  * - Immersive fullscreen mode for automotive display
  * - Navigation between main projection and settings
- *
- * Ported from: example/lib/main.dart
  */
 class MainActivity : ComponentActivity() {
     // Nullable to prevent UninitializedPropertyAccessException if Activity
@@ -85,8 +86,8 @@ class MainActivity : ComponentActivity() {
      * Provides immediate detection when the Carlinkit adapter is physically
      * disconnected, enabling faster recovery than waiting for USB transfer errors.
      *
-     * This is a feature that neither the original Flutter carlink nor carlink_native
-     * had - both relied on transfer error detection for physical disconnection.
+     * Neither the original carlink nor early carlink_native versions had this —
+     * both relied on transfer error detection for physical disconnection.
      */
     private val usbDetachReceiver =
         object : BroadcastReceiver() {
@@ -146,6 +147,11 @@ class MainActivity : ComponentActivity() {
         // Register USB detachment receiver for immediate disconnect detection
         registerUsbDetachReceiver()
 
+        // Launch CarAppActivity to trigger Templates Host → cluster binding chain.
+        // CarAppActivity briefly takes focus (~3s) while binding completes,
+        // then we bring MainActivity back to the foreground.
+        launchCarAppActivity()
+
         // Set up Compose UI
         // carlinkManager is guaranteed non-null here since initializeCarlinkManager()
         // completed synchronously above. Use !! with confidence.
@@ -188,6 +194,14 @@ class MainActivity : ComponentActivity() {
         // USB connection and audio continue unaffected.
         logInfo("[LIFECYCLE] onStop - pausing video", tag = "MAIN")
         carlinkManager?.pauseVideo()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // USB_DEVICE_ATTACHED re-delivers here (singleTop). If the cluster session
+        // was destroyed by RendererServiceBinder.terminate during USB re-enumeration,
+        // re-launch CarAppActivity to re-establish the binding chain.
+        launchCarAppActivity()
     }
 
     override fun onDestroy() {
@@ -260,7 +274,6 @@ class MainActivity : ComponentActivity() {
 
     private fun initializeCarlinkManager() {
         // Get window metrics to determine USABLE area (excluding system UI)
-        // This matches Flutter's DisplayMetricsHandler.handleGetWindowBounds() approach
         // Using WindowMetrics API (minSdk 32 guarantees API 30+ availability)
         val windowMetrics = windowManager.currentWindowMetrics
         val bounds = windowMetrics.bounds
@@ -324,7 +337,7 @@ class MainActivity : ComponentActivity() {
             AdapterConfig(
                 width = configWidth,
                 height = configHeight,
-                fps = refreshRate,
+                fps = userConfig.fps.fps,
                 dpi = dpi,
                 // Mark if user explicitly selected a resolution (non-AUTO)
                 userSelectedResolution = userSelectedResolution,
@@ -384,7 +397,6 @@ class MainActivity : ComponentActivity() {
     /**
      * Loads display mode preference and applies it.
      * Uses synchronous SharedPreferences cache to avoid ANR.
-     * Matches Flutter: main.dart lines 50-57
      */
     private fun loadAndApplyDisplayMode() {
         // Read preference from sync cache (instant, no I/O blocking)
@@ -443,6 +455,46 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
+     * Launches CarAppActivity in a separate task to trigger Templates Host binding.
+     * Combined with taskAffinity="zeno.carlink.templates" and singleTask launch mode,
+     * this opens in its own task stack without disturbing MainActivity.
+     *
+     * Guarded by ClusterBindingState.sessionAlive — only launches if no live session exists.
+     * RendererServiceBinder.terminate() can kill the session on USB re-enumeration,
+     * so this must be callable from both onCreate() and onNewIntent().
+     */
+    private fun launchCarAppActivity() {
+        if (ClusterBindingState.sessionAlive) {
+            logInfo("[CLUSTER] Cluster session already alive — skipping launch", tag = "MAIN")
+            return
+        }
+
+        try {
+            val intent = Intent().apply {
+                setClassName(this@MainActivity, "androidx.car.app.activity.CarAppActivity")
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            startActivity(intent)
+            logInfo("[CLUSTER] Launched CarAppActivity for Templates Host binding", tag = "MAIN")
+
+            // CarAppActivity takes focus briefly while the binding chain completes:
+            // handshake → session → navigationStarted() → ClusterTurnCardActivity (~2-3s).
+            // After 3s, bring MainActivity back to the foreground.
+            Handler(Looper.getMainLooper()).postDelayed({
+                if (!isDestroyed && !isFinishing) {
+                    val bringBack = Intent(this@MainActivity, MainActivity::class.java).apply {
+                        flags = Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                    }
+                    startActivity(bringBack)
+                    logInfo("[CLUSTER] Brought MainActivity back to foreground", tag = "MAIN")
+                }
+            }, 3000)
+        } catch (e: Exception) {
+            logWarn("[CLUSTER] Failed to launch CarAppActivity: ${e.message}", tag = "MAIN")
+        }
+    }
+
+    /**
      * Unregisters the USB detachment BroadcastReceiver.
      */
     private fun unregisterUsbDetachReceiver() {
@@ -460,8 +512,7 @@ class MainActivity : ComponentActivity() {
  * Main Composable App with Overlay Navigation
  *
  * ARCHITECTURE: Uses overlay/stack pattern instead of screen replacement.
- * This matches Flutter's Navigator.push() behavior where the MainPage stays
- * mounted in the widget tree when SettingsPage is pushed on top.
+ * MainScreen stays composed when SettingsScreen is pushed on top.
  *
  * WHY: The VideoSurface in MainScreen uses a TextureView with SurfaceTexture.
  * When MainScreen is replaced (disposed), the SurfaceTexture is destroyed,

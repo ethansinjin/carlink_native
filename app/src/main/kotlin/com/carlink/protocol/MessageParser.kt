@@ -13,8 +13,6 @@ import java.nio.charset.StandardCharsets
  *
  * Parses binary messages received from the Carlinkit adapter into typed message objects.
  * Handles header validation, payload extraction, and type-specific parsing.
- *
- * Ported from: lib/driver/readable.dart
  */
 object MessageParser {
     /**
@@ -69,8 +67,7 @@ object MessageParser {
             MessageType.COMMAND -> parseCommand(header, payload)
             MessageType.PLUGGED -> parsePlugged(header, payload)
             MessageType.UNPLUGGED -> UnpluggedMessage(header)
-            MessageType.OPEN -> parseOpened(header, payload)
-            else -> UnknownMessage(header, payload)
+            else -> UnknownMessage(header)
         }
 
     private fun parseAudioData(
@@ -78,7 +75,7 @@ object MessageParser {
         payload: ByteArray?,
     ): Message {
         if (payload == null || header.length < 12) {
-            return UnknownMessage(header, payload)
+            return UnknownMessage(header)
         }
 
         val buffer = ByteBuffer.wrap(payload, 0, header.length).order(ByteOrder.LITTLE_ENDIAN)
@@ -156,7 +153,6 @@ object MessageParser {
                 height = -1,
                 encoderState = -1,
                 pts = -1,
-                flags = -1,
                 data = null,
             )
         }
@@ -168,10 +164,10 @@ object MessageParser {
         // Field names corrected per RE documentation (video_protocol.md):
         // - offset 8: encoderState (protocol ID: 3=AA, 7=CarPlay)
         // - offset 12: pts (source presentation timestamp in milliseconds)
-        // - offset 16: flags (always 0)
+        // - offset 16: flags (always 0, skipped)
         val encoderState = buffer.int
         val pts = buffer.int
-        val flags = buffer.int
+        buffer.int // flags — always 0, skip
 
         val videoData =
             if (header.length > 20) {
@@ -188,7 +184,6 @@ object MessageParser {
             height = height,
             encoderState = encoderState,
             pts = pts,
-            flags = flags,
             data = videoData,
         )
     }
@@ -213,7 +208,7 @@ object MessageParser {
                     mapOf("AlbumCover" to imageData)
                 }
 
-                MediaType.DATA -> {
+                MediaType.DATA, MediaType.NAVI_JSON -> {
                     if (header.length < 6) {
                         // Need at least: 4 (type int) + 1 (JSON byte) + 1 (trailing null)
                         emptyMap()
@@ -270,25 +265,6 @@ object MessageParser {
         return PluggedMessage(header, phoneType, wifi)
     }
 
-    private fun parseOpened(
-        header: MessageHeader,
-        payload: ByteArray?,
-    ): Message {
-        if (payload == null || header.length < 28) {
-            return OpenedMessage(header, 0, 0, 0, 0, 0, 0, 0)
-        }
-        val buffer = ByteBuffer.wrap(payload, 0, header.length).order(ByteOrder.LITTLE_ENDIAN)
-        return OpenedMessage(
-            header = header,
-            width = buffer.int,
-            height = buffer.int,
-            fps = buffer.int,
-            format = buffer.int,
-            packetMax = buffer.int,
-            iBox = buffer.int,
-            phoneMode = buffer.int,
-        )
-    }
 }
 
 // ==================== Message Classes ====================
@@ -307,9 +283,8 @@ sealed class Message(
  */
 class UnknownMessage(
     header: MessageHeader,
-    val data: ByteArray?,
 ) : Message(header) {
-    override fun toString(): String = "UnknownMessage(type=${header.type}, dataLength=${data?.size})"
+    override fun toString(): String = "UnknownMessage(type=${header.type})"
 }
 
 /**
@@ -373,7 +348,6 @@ class AudioDataMessage(
  * Field names corrected per RE documentation (video_protocol.md, Jan 2026):
  * - encoderState: Protocol identifier (3=Android Auto, 7=CarPlay)
  * - pts: Source presentation timestamp in milliseconds from phone
- * - flags: Always 0
  */
 class VideoDataMessage(
     header: MessageHeader,
@@ -383,8 +357,6 @@ class VideoDataMessage(
     val encoderState: Int,
     /** Source presentation timestamp in milliseconds from phone */
     val pts: Int,
-    /** Flags (always 0) */
-    val flags: Int,
     val data: ByteArray?,
 ) : Message(header) {
     override fun toString(): String = "VideoData(${width}x$height, encoderState=$encoderState, pts=$pts)"
@@ -399,22 +371,6 @@ class MediaDataMessage(
     val payload: Map<String, Any>,
 ) : Message(header) {
     override fun toString(): String = "MediaData(type=${type.name})"
-}
-
-/**
- * Opened response message.
- */
-class OpenedMessage(
-    header: MessageHeader,
-    val width: Int,
-    val height: Int,
-    val fps: Int,
-    val format: Int,
-    val packetMax: Int,
-    val iBox: Int,
-    val phoneMode: Int,
-) : Message(header) {
-    override fun toString(): String = "Opened(${width}x$height@${fps}fps, format=$format, packetMax=$packetMax)"
 }
 
 /**

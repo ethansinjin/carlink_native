@@ -10,6 +10,7 @@
     <!-- Required by connectedDevice foreground service type on Android 14+ -->
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="androidx.car.app.NAVIGATION_TEMPLATES" />
 
     <!-- USB Host Feature (required) -->
     <uses-feature
@@ -77,6 +78,22 @@
                 android:value="true" />
         </activity>
 
+        <!-- Hidden CarAppActivity — exists solely to trigger Templates Host binding.
+             NOT a launcher. Lives in separate task. Excluded from recents.
+             MainActivity remains the primary UI. -->
+        <activity
+            android:name="androidx.car.app.activity.CarAppActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:taskAffinity="zeno.carlink.templates"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:label="@string/app_name">
+            <meta-data
+                android:name="distractionOptimized"
+                android:value="true" />
+        </activity>
+
         <!-- MediaBrowserService for AAOS Integration -->
         <service
             android:name=".media.CarlinkMediaBrowserService"
@@ -91,6 +108,30 @@
                 android:name="com.gm.homescreen.visibility"
                 android:value="HIDDEN" />
         </service>
+
+        <!-- Cluster Navigation CarAppService (headless — no UI on main display) -->
+        <service
+            android:name=".cluster.CarlinkClusterService"
+            android:exported="true"
+            tools:ignore="ExportedService">
+            <intent-filter>
+                <action android:name="androidx.car.app.CarAppService" />
+                <category android:name="androidx.car.app.category.NAVIGATION" />
+                <category android:name="androidx.car.app.category.FEATURE_CLUSTER" />
+            </intent-filter>
+            <meta-data android:name="androidx.car.app.minCarApiLevel" android:value="6" />
+            <meta-data android:name="com.gm.homescreen.visibility" android:value="HIDDEN" />
+        </service>
+
+        <meta-data
+            android:name="com.android.automotive"
+            android:resource="@xml/automotive_app_desc" />
+
+        <!-- Required at application level — Templates Host reads minCarApiLevel
+             from application metadata, not from service element -->
+        <meta-data
+            android:name="androidx.car.app.minCarApiLevel"
+            android:value="6" />
 
         <!-- APPLICATION-LEVEL DISTRACTION OPTIMIZATION DECLARATION -->
         <meta-data

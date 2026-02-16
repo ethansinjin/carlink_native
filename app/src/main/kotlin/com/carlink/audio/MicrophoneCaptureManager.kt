@@ -102,8 +102,12 @@ class MicrophoneCaptureManager(
     private val isRunning = AtomicBoolean(false)
 
     private var startTime: Long = 0
-    private var totalBytesCapture: Long = 0
-    private var overrunCount: Int = 0
+
+    // @Volatile: written by capture thread, read by main thread in getStats()/stop().
+    // Long requires volatile for JMM atomicity (JLS 17.7); Int for visibility.
+    // Matches AudioRingBuffer's @Volatile counter pattern.
+    @Volatile private var totalBytesCapture: Long = 0
+    @Volatile private var overrunCount: Int = 0
 
     // 500ms buffer prevents overruns when main thread blocked (Session 6 fix)
     private val bufferCapacityMs = 500
@@ -192,12 +196,25 @@ class MicrophoneCaptureManager(
                 return true
             } catch (e: SecurityException) {
                 log("[MIC] ERROR: Permission denied: ${e.message}")
+                // Release AudioRecord if it was created before the exception.
+                // AudioRecord.release() is unconditionally safe per AOSP source.
+                // Without cleanup, the leaked AudioRecord holds the Intel SST HAL
+                // input stream, blocking all future mic capture (Siri/phone calls).
+                audioRecord?.release()
+                audioRecord = null
+                micBuffer = null
                 return false
             } catch (e: IllegalArgumentException) {
                 log("[MIC] ERROR: Invalid parameters: ${e.message}")
+                audioRecord?.release()
+                audioRecord = null
+                micBuffer = null
                 return false
             } catch (e: IllegalStateException) {
                 log("[MIC] ERROR: Invalid state: ${e.message}")
+                audioRecord?.release()
+                audioRecord = null
+                micBuffer = null
                 return false
             }
         }
@@ -205,10 +222,20 @@ class MicrophoneCaptureManager(
 
     fun stop() {
         synchronized(lock) {
-            if (!isRunning.get()) return
-
-            log("[MIC] Stopping capture")
-            isRunning.set(false)
+            // Guard covers both normal stop and post-error cleanup (isRunning already false).
+            // After a fatal capture error, cleanupAfterCaptureError() sets isRunning=false and
+            // releases audioRecord, but micBuffer/currentFormat/captureThread still need cleanup.
+            if (!isRunning.getAndSet(false)) {
+                // If the capture thread already cleared isRunning (fatal error path),
+                // we still need to join the thread and clean up remaining state.
+                if (captureThread != null) {
+                    log("[MIC] Stopping capture (post-error cleanup)")
+                } else {
+                    return
+                }
+            } else {
+                log("[MIC] Stopping capture")
+            }
 
             captureThread?.interrupt()
             try {
@@ -217,6 +244,8 @@ class MicrophoneCaptureManager(
             }
             captureThread = null
 
+            // audioRecord may already be null if capture thread released it on fatal error.
+            // AudioRecord.release() is safe to call; null-check prevents NPE.
             try {
                 audioRecord?.let { record ->
                     if (record.recordingState == AudioRecord.RECORDSTATE_RECORDING) record.stop()
@@ -311,6 +340,24 @@ class MicrophoneCaptureManager(
         logCallback.log(message)
     }
 
+    /**
+     * Release AudioRecord from capture thread after fatal read() error.
+     *
+     * Called WITHOUT holding [lock] to avoid deadlock (stop() holds lock during join()).
+     * AudioRecord.release() is thread-safe per AOSP — it acquires its own internal lock
+     * (mLock in native AudioRecord.cpp) and is safe to call from any thread.
+     * Setting audioRecord to null prevents stop() from double-releasing.
+     */
+    private fun cleanupAfterCaptureError() {
+        isRunning.set(false)
+        try {
+            audioRecord?.release()
+        } catch (e: Exception) {
+            Log.w(TAG, "[MIC] Release during error cleanup: ${e.message}")
+        }
+        audioRecord = null
+    }
+
     /** Capture thread (URGENT_AUDIO priority). Reads AudioRecord, writes to ring buffer. */
     private inner class MicCaptureThread(
         private val format: MicFormatConfig,
@@ -324,6 +371,7 @@ class MicrophoneCaptureManager(
 
             val record = audioRecord ?: return
             val buffer = micBuffer ?: return
+            var fatalError = false
 
             while (isRunning.get() && !isInterrupted) {
                 try {
@@ -345,24 +393,28 @@ class MicrophoneCaptureManager(
                         bytesRead == AudioRecord.ERROR_INVALID_OPERATION -> {
                             AudioDebugLogger.logMicError("INVALID_OPERATION", "AudioRecord returned ERROR_INVALID_OPERATION")
                             Log.e(TAG, "[MIC] ERROR: Invalid operation")
+                            fatalError = true
                             break
                         }
 
                         bytesRead == AudioRecord.ERROR_BAD_VALUE -> {
                             AudioDebugLogger.logMicError("BAD_VALUE", "AudioRecord returned ERROR_BAD_VALUE")
                             Log.e(TAG, "[MIC] ERROR: Bad value")
+                            fatalError = true
                             break
                         }
 
                         bytesRead == AudioRecord.ERROR_DEAD_OBJECT -> {
                             AudioDebugLogger.logMicError("DEAD_OBJECT", "AudioRecord returned ERROR_DEAD_OBJECT")
                             Log.e(TAG, "[MIC] ERROR: AudioRecord dead")
+                            fatalError = true
                             break
                         }
 
                         bytesRead == AudioRecord.ERROR -> {
                             AudioDebugLogger.logMicError("GENERIC", "AudioRecord returned ERROR")
                             Log.e(TAG, "[MIC] ERROR: Generic error")
+                            fatalError = true
                             break
                         }
                     }
@@ -371,6 +423,14 @@ class MicrophoneCaptureManager(
                 } catch (e: Exception) {
                     Log.e(TAG, "[MIC] Capture thread error: ${e.message}")
                 }
+            }
+
+            // On fatal error: release AudioRecord and clear isRunning so isCapturing()
+            // returns false and callers (USB send thread) see the state change immediately.
+            // Must NOT acquire lock — stop() holds lock during join(), would deadlock.
+            if (fatalError) {
+                log("[MIC] Capture thread exiting due to fatal error, releasing AudioRecord")
+                cleanupAfterCaptureError()
             }
 
             log("[MIC] Capture thread stopped, total captured: ${totalBytesCapture}B")

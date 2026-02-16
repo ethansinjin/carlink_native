@@ -120,6 +120,22 @@ enum class MediaDelayConfig(val delayMs: Int) {
 }
 
 /**
+ * Frame rate configuration for adapter initialization.
+ * Controls the FPS value sent in the OPEN message to the adapter firmware.
+ * 30 FPS is default — sufficient for CarPlay UI and reduces thermal/power load.
+ * 60 FPS available for smoother animations if the display supports it.
+ */
+enum class FpsConfig(val fps: Int) {
+    FPS_30(30),
+    FPS_60(60),
+    ;
+
+    companion object {
+        val DEFAULT = FPS_30
+    }
+}
+
+/**
  * Video resolution configuration for adapter initialization.
  *
  * AUTO uses the detected display resolution (usable area after system UI).
@@ -224,6 +240,9 @@ class AdapterConfigPreference private constructor(
         // Video resolution: stored as string "WIDTHxHEIGHT" or "AUTO"
         private val KEY_VIDEO_RESOLUTION = stringPreferencesKey("video_resolution")
 
+        // FPS: stored as int (30 or 60)
+        private val KEY_FPS = intPreferencesKey("fps")
+
         // Initialization tracking
         private val KEY_HAS_COMPLETED_FIRST_INIT = booleanPreferencesKey("has_completed_first_init")
         private val KEY_PENDING_CHANGES = stringSetPreferencesKey("pending_changes")
@@ -237,6 +256,7 @@ class AdapterConfigPreference private constructor(
         private const val SYNC_CACHE_KEY_CALL_QUALITY = "call_quality"
         private const val SYNC_CACHE_KEY_MEDIA_DELAY = "media_delay"
         private const val SYNC_CACHE_KEY_VIDEO_RESOLUTION = "video_resolution"
+        private const val SYNC_CACHE_KEY_FPS = "fps"
         private const val SYNC_CACHE_KEY_HAS_COMPLETED_FIRST_INIT = "has_completed_first_init"
         private const val SYNC_CACHE_KEY_PENDING_CHANGES = "pending_changes"
 
@@ -251,6 +271,7 @@ class AdapterConfigPreference private constructor(
             const val CALL_QUALITY = "call_quality"
             const val MEDIA_DELAY = "media_delay"
             const val VIDEO_RESOLUTION = "video_resolution"
+            const val FPS = "fps"
         }
     }
 
@@ -458,6 +479,37 @@ class AdapterConfigPreference private constructor(
         }
     }
 
+    val fpsFlow: Flow<FpsConfig> =
+        dataStore.data.map { preferences ->
+            val value = preferences[KEY_FPS] ?: FpsConfig.DEFAULT.fps
+            FpsConfig.entries.find { it.fps == value } ?: FpsConfig.DEFAULT
+        }
+
+    /**
+     * Get current FPS configuration synchronously.
+     */
+    fun getFpsSync(): FpsConfig {
+        val value = syncCache.getInt(SYNC_CACHE_KEY_FPS, FpsConfig.DEFAULT.fps)
+        return FpsConfig.entries.find { it.fps == value } ?: FpsConfig.DEFAULT
+    }
+
+    /**
+     * Set FPS configuration.
+     */
+    suspend fun setFps(config: FpsConfig) {
+        try {
+            dataStore.edit { preferences ->
+                preferences[KEY_FPS] = config.fps
+            }
+            syncCache.edit().putInt(SYNC_CACHE_KEY_FPS, config.fps).apply()
+            addPendingChange(ConfigKey.FPS)
+            logInfo("FPS preference saved: ${config.fps}", tag = "AdapterConfig")
+        } catch (e: Exception) {
+            logError("Failed to save FPS preference: $e", tag = "AdapterConfig")
+            throw e
+        }
+    }
+
     data class UserConfig(
         /** Audio transfer mode: true = bluetooth, false = adapter (default) */
         val audioTransferMode: Boolean,
@@ -471,6 +523,8 @@ class AdapterConfigPreference private constructor(
         val mediaDelay: MediaDelayConfig,
         /** Video resolution configuration */
         val videoResolution: VideoResolutionConfig,
+        /** Frame rate configuration */
+        val fps: FpsConfig,
     ) {
         companion object {
             val DEFAULT =
@@ -481,6 +535,7 @@ class AdapterConfigPreference private constructor(
                     callQuality = CallQualityConfig.DEFAULT,
                     mediaDelay = MediaDelayConfig.DEFAULT,
                     videoResolution = VideoResolutionConfig.AUTO,
+                    fps = FpsConfig.DEFAULT,
                 )
         }
     }
@@ -498,6 +553,7 @@ class AdapterConfigPreference private constructor(
         val callQuality = getCallQualitySync()
         val mediaDelay = getMediaDelaySync()
         val videoResolution = getVideoResolutionSync()
+        val fps = getFpsSync()
         return UserConfig(
             audioTransferMode = audioSource == AudioSourceConfig.BLUETOOTH,
             micSource = micSource,
@@ -505,6 +561,7 @@ class AdapterConfigPreference private constructor(
             callQuality = callQuality,
             mediaDelay = mediaDelay,
             videoResolution = videoResolution,
+            fps = fps,
         )
     }
 
@@ -523,6 +580,7 @@ class AdapterConfigPreference private constructor(
                 preferences.remove(KEY_CALL_QUALITY)
                 preferences.remove(KEY_MEDIA_DELAY)
                 preferences.remove(KEY_VIDEO_RESOLUTION)
+                preferences.remove(KEY_FPS)
                 preferences.remove(KEY_HAS_COMPLETED_FIRST_INIT)
                 preferences.remove(KEY_PENDING_CHANGES)
             }
@@ -537,6 +595,7 @@ class AdapterConfigPreference private constructor(
                     remove(SYNC_CACHE_KEY_CALL_QUALITY)
                     remove(SYNC_CACHE_KEY_MEDIA_DELAY)
                     remove(SYNC_CACHE_KEY_VIDEO_RESOLUTION)
+                    remove(SYNC_CACHE_KEY_FPS)
                     remove(SYNC_CACHE_KEY_HAS_COMPLETED_FIRST_INIT)
                     remove(SYNC_CACHE_KEY_PENDING_CHANGES)
                 }.apply()

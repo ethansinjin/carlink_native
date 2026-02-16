@@ -14,19 +14,10 @@ public class VideoDebugLogger {
         debugEnabled = enabled;
     }
 
-    public static boolean isDebugEnabled() {
-        return debugEnabled;
-    }
-
     // Codec lifecycle
     public static void logCodecInit(String codecName, int width, int height) {
         if (!debugEnabled) return;
         Log.i(TAG, "[VIDEO_CODEC] Init: " + codecName + " @ " + width + "x" + height);
-    }
-
-    public static void logCodecConfigured(String format) {
-        if (!debugEnabled) return;
-        Log.i(TAG, "[VIDEO_CODEC] Configured: " + format);
     }
 
     public static void logCodecStarted() {
@@ -54,12 +45,6 @@ public class VideoDebugLogger {
         if (!debugEnabled) return;
         Log.i(TAG, "[VIDEO_CODEC] Format changed: " + width + "x" + height +
                 ", color=" + colorFormat);
-    }
-
-    public static void logCodecInputAvailable(int bufferIndex, int queuedBuffers) {
-        if (!debugEnabled) return;
-        Log.v(TAG, "[VIDEO_CODEC] Input available: buffer=" + bufferIndex +
-                ", queued=" + queuedBuffers);
     }
 
     // Frame drops
