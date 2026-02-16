@@ -19,6 +19,16 @@ android {
         vectorDrawables {
             useSupportLibrary = true
         }
+
+        // This block is different from the one you use to link Gradle
+        // to your CMake or ndk-build script.
+        externalNativeBuild {
+            // For ndk-build, instead use the ndkBuild block.
+            cmake {
+                // Passes optional arguments to CMake.
+                arguments += listOf("-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON")
+            }
+        }
     }
 
     buildTypes {
@@ -59,6 +69,8 @@ android {
         disable += "DiscouragedApi"
         disable += "Instantiatable"  // CarAppActivity from app-automotive AAR — false positive
     }
+    ndkVersion = "29.0.14206865"
+    buildToolsVersion = "36.0.0"
 }
 
 dependencies {
