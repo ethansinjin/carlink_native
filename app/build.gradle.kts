@@ -11,7 +11,7 @@ android {
         applicationId = "com.ethansinjin.carlink"
         minSdk = 32
         targetSdk = 36
-        versionCode = 70
+        versionCode = 71
         versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -58,6 +58,9 @@ android {
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
+        jniLibs {
+            useLegacyPackaging = false
         }
     }
 
