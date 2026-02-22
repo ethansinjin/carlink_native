@@ -97,7 +97,7 @@
             android:name="androidx.car.app.activity.CarAppActivity"
             android:exported="false"
             android:launchMode="singleTask"
-            android:taskAffinity="zeno.carlink.templates"
+            android:taskAffinity="com.ethansinjin.carlink.templates"
             android:excludeFromRecents="true"
             android:theme="@android:style/Theme.Translucent.NoTitleBar">
             <meta-data
