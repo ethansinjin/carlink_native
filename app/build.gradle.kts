@@ -71,11 +71,11 @@ android {
         create("play") {
             dimension = "distribution"
             manifestPlaceholders["clusterIconAuthority"] =
-                "zeno.carlink.ClusterIconContentProvider"
+                "com.ethansinjin.carlink.ClusterIconContentProvider"
             buildConfigField(
                 "String",
                 "CLUSTER_ICON_AUTHORITY",
-                "\"zeno.carlink.ClusterIconContentProvider\""
+                "\"com.ethansinjin.carlink.ClusterIconContentProvider\""
             )
         }
     }
