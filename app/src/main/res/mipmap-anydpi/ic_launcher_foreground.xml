@@ -1,24 +1,8 @@
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:aapt="http://schemas.android.com/aapt"
-    android:width="48dp"
-    android:height="48dp"
+    android:width="108dp"
+    android:height="108dp"
     android:viewportWidth="170.258"
     android:viewportHeight="170.258">
-
-    <!-- Green rounded square background -->
-    <path
-        android:pathData="M157.668,125.402c0,17.838 -14.459,32.297 -32.296,32.297H44.886c-17.837,0 -32.296,-14.459 -32.296,-32.297V44.917c0,-17.837 14.459,-32.296 32.296,-32.296h80.486c17.837,0 32.296,14.459 32.296,32.296v80.485z">
-        <aapt:attr name="android:fillColor">
-            <gradient
-                android:type="linear"
-                android:startX="85.13"
-                android:startY="157.699"
-                android:endX="85.13"
-                android:endY="12.621"
-                android:startColor="#0BD319"
-                android:endColor="#86FC6F"/>
-        </aapt:attr>
-    </path>
 
     <!-- White circle arc + play button -->
     <path
