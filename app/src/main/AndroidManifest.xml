@@ -14,11 +14,30 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="androidx.car.app.NAVIGATION_TEMPLATES" />
+    <!-- Cluster CarAppService draws into the host-provided render surface. Verified on
+         the AAOS emulator: the Templates Host provisions a virtual display
+         "virtual:zeno.carlink,<uid>,CarAppService,0" owned by this app. Required by
+         Play AAOS review for navigation apps (developer.android.com/training/cars/apps/library/draw-maps). -->
+    <uses-permission android:name="androidx.car.app.ACCESS_SURFACE" />
 
-    <!-- USB Host Feature (required) -->
+    <!-- AltVideo (USB 0x2C) IPC permission. Protects NaviVideoSourceService so only
+         co-signed priv-apps (ClusterHomeDisplay) can bind and consume the stream.
+         signature|privileged: caller must share our signing cert AND live in
+         /system/priv-app/. uses-permission is required because the service-protecting
+         permission is declared and used by the same app. -->
+    <permission
+        android:name="com.carlink.permission.NAVI_VIDEO_STREAM"
+        android:protectionLevel="signature|privileged" />
+    <uses-permission android:name="com.carlink.permission.NAVI_VIDEO_STREAM" />
+
+    <!-- USB Host. required=false on purpose: the CPC200 adapter needs USB host at
+         runtime, but GM AAOS (gm/gminfo37) does NOT advertise android.hardware.usb.host
+         in its Play device profile, so required=true filtered the truck out of the AAOS
+         track. required=false stops Play filtering on it; the UsbManager API + the
+         usb_device_filter below are unaffected and still work at runtime. -->
     <uses-feature
         android:name="android.hardware.usb.host"
-        android:required="true" />
+        android:required="false" />
 
     <!-- Optional Features -->
     <uses-feature
@@ -31,6 +50,14 @@
          services have no host. -->
     <uses-feature
         android:name="android.hardware.type.automotive"
+        android:required="true" />
+    <!-- Car App Library Templates Host. The cluster CarAppService is bound and
+         surface-provisioned by com.google.android.apps.automotive.templates.host
+         (live-verified on the AAOS emulator: renderer_service holds an open
+         ConnectionRecord to CarlinkClusterService). Declared required per Play AAOS
+         review; every certified AAOS build — including GM — ships the Templates Host. -->
+    <uses-feature
+        android:name="android.software.car.templates_host"
         android:required="true" />
     <uses-feature
         android:name="android.hardware.location.gps"
@@ -151,6 +178,22 @@
             <meta-data android:name="androidx.car.app.minCarApiLevel" android:value="6" />
             <meta-data android:name="com.gm.homescreen.visibility" android:value="HIDDEN" />
         </service>
+
+        <!-- AltVideo (USB 0x2C) producer Service. ClusterHomeDisplay binds to
+             ComponentName("zeno.carlink", "zeno.carlink.ipc.NaviVideoSourceService"),
+             so the class FQN must be the applicationId-prefixed form (NOT the
+             namespace-prefixed .ipc.NaviVideoSourceService shorthand). The class
+             lives at app/src/main/kotlin/zeno/carlink/ipc/NaviVideoSourceService.kt
+             to match.
+
+             Service is exported and present in all builds; it is inert on release
+             APKs and on real devices because the gate in CarlinkManager prevents
+             naviScreenInfo from being sent — without that, the adapter never emits
+             0x2C and no consumer binds. Cost of leaving it exported on prod: zero. -->
+        <service
+            android:name="zeno.carlink.ipc.NaviVideoSourceService"
+            android:exported="true"
+            android:permission="com.carlink.permission.NAVI_VIDEO_STREAM" />
 
         <meta-data
             android:name="com.android.automotive"
